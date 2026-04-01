@@ -9,8 +9,11 @@
 # Rust
 target/
 
-# FileMaker SDK (proprietary binaries)
-fm-plugin/Libraries/
+# FileMaker SDK (keep folder structure only — exclude all contents except README/.gitkeep)
+fm-plugin/Libraries/**
+!fm-plugin/Libraries/**/
+!fm-plugin/Libraries/README.md
+!fm-plugin/Libraries/**/.gitkeep
 
 # Xcode user data
 xcuserdata/

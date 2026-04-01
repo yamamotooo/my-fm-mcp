@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VSCode
+.vscode/
+
+# Rust
+target/
+
+# FileMaker SDK (proprietary binaries)
+fm-plugin/Libraries/
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+
+# Build outputs
+*.fmplugin
+*.fmx64
+fm-plugin/FileMakerMCP/build/
+
+# Windows
+Thumbs.db

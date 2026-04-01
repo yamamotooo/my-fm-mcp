@@ -1,4 +1,4 @@
-# FileMaker MCP プロジェクト
+# FileMaker MCP プロジェクト (仮)
 
 ## ディレクトリ構成
 

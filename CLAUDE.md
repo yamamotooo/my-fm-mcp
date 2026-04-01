@@ -166,3 +166,4 @@ cp mcp-server/target/release/filemaker-mcp /usr/local/bin/
 - `ExprEnvUniquePtr` で生成した `ExprEnv` は現在のファイルコンテキストを持つため、`Get(FileName)` が空になるケースはファイルを開いていない状態のみ
 - `get_tables` の応答タイムアウトは 5 秒 (macOS/Linux のみ。Windows は未設定)
 - Windows: ソースファイルに日本語コメントを書く場合は UTF-8 BOM 付きで保存すること (MSVC の SJIS 誤読み対策)
+- **IPC 認証なし**: 現在 UDS / Named Pipe に認証機構がないため、FileMaker Pro 起動中はローカルの同一ユーザー（macOS）または同一マシン上の誰でも接続可能。将来的にはソケットパーミッション制限やトークン検証の追加を検討すること

@@ -10,7 +10,8 @@ filemaker-mcp-workspace/
 │   └── src/
 │       ├── main.rs              ← JSON-RPC 2.0 ハンドラ、ツール定義
 │       ├── ipc.rs               ← IPC クライアント (Unix: UDS / Windows: Named Pipe)
-│       └── clipboard.rs         ← クリップボード書き込み (macOS/Windows 直接実装)
+│       ├── clipboard.rs         ← クリップボード書き込み (macOS/Windows 直接実装)
+│       └── layout_gen.rs        ← レイアウト XML 生成 (fmxmlsnippet)
 └── fm-plugin/                   ← C++ FileMaker Plugin
     ├── Headers/FMWrapper/       ← FileMaker SDK ヘッダ
     └── FileMakerMCP/FileMakerMCP/
@@ -25,8 +26,13 @@ Claude Desktop
   ▼
 mcp-server (Rust バイナリ)
   │  set_clipboard → clipboard.rs で OS API を直接呼び出し
+  │                  xml パラメータ: 文字列をそのまま書き込み
+  │                  file パラメータ: ファイルを読み込んで書き込み
   │                  macOS: NSPasteboard (UTI: dyn.ah62d4rv4gk8zuxnqgk)
   │                  Windows: RegisterClipboardFormat("Mac-XML2") + 4byte header
+  │
+  │  generate_layout → IPC で get_fields を呼び出し → layout_gen.rs で XML 生成
+  │                    → ファイルに保存（返り値はパスのみ、XML はコンテキストに乗せない）
   │
   │  get_fields / get_tables / ping →
   │  macOS/Linux: Unix Domain Socket  /tmp/filemaker_mcp.sock
@@ -50,27 +56,44 @@ fm-plugin (C++ .fmplugin / .fmx64)  ← FileMaker Pro に読み込まれる
 
 ## MCP ツール一覧
 
-| ツール名           | 処理場所          | 説明                                                   |
-|--------------------|-------------------|--------------------------------------------------------|
-| `hello_filemaker`  | IPC → Plugin      | Plugin に ping を送り疎通状態を返す                    |
-| `get_tables`       | IPC → Plugin      | 現在開いている FM ファイルのテーブル一覧               |
-| `get_records`      | IPC → Plugin      | 指定テーブルのレコード一覧を返す                       |
-| `debug_eval`       | IPC → Plugin      | 任意の FileMaker 計算式を評価して結果を返す（デバッグ用）|
-| `get_fields`       | IPC → Plugin      | 指定テーブルのフィールド名・型一覧を取得               |
-| `set_clipboard`    | Rust 直接         | FileMaker レイアウト XML をクリップボードに書き込む    |
+| ツール名            | 処理場所              | 説明                                                                        |
+|---------------------|-----------------------|-----------------------------------------------------------------------------|
+| `hello_filemaker`   | IPC → Plugin          | Plugin に ping を送り疎通状態を返す                                         |
+| `get_tables`        | IPC → Plugin          | 現在開いている FM ファイルのテーブル一覧                                    |
+| `get_records`       | IPC → Plugin          | 指定テーブルのレコード一覧を返す                                            |
+| `debug_eval`        | IPC → Plugin          | 任意の FileMaker 計算式を評価して結果を返す（デバッグ用）                   |
+| `get_fields`        | IPC → Plugin          | 指定テーブルのフィールド名・型一覧を取得                                    |
+| `set_clipboard`     | Rust 直接             | `xml` または `file` で指定した FileMaker レイアウト XML をクリップボードに書き込む |
+| `generate_layout`   | IPC → Plugin + Rust   | `get_fields` の結果からレイアウト XML を生成してファイルに保存              |
+
+### generate_layout のワークフロー
+
+```
+generate_layout [table=...] [output_file=...]
+  → IPC で get_fields を呼び出し
+  → layout_gen::generate() で fmxmlsnippet XML を生成
+  → /tmp/filemaker_layout_<table>.xml に保存（output_file 省略時）
+  → 返り値: "テーブル名 の N フィールドを生成。\nファイル: /tmp/..."
+
+set_clipboard --file=/tmp/filemaker_layout_<table>.xml
+  → FileMaker で Cmd+V してレイアウトにペースト
+```
+
+XML はファイル経由で受け渡すため、会話コンテキストにトークンを消費しない。
 
 ## 実装状況
 
 ### Rust 側（実装済み）
 
-| ツール         | 状態   |
-|----------------|--------|
-| `hello_filemaker` | ✅ |
-| `get_tables`   | ✅     |
-| `get_records`  | ✅     |
-| `debug_eval`   | ✅     |
-| `get_fields`   | ✅     |
-| `set_clipboard`| ✅（OS API 直接呼び出し）|
+| ツール              | 状態   | 備考                                              |
+|---------------------|--------|---------------------------------------------------|
+| `hello_filemaker`   | ✅     |                                                   |
+| `get_tables`        | ✅     |                                                   |
+| `get_records`       | ✅     |                                                   |
+| `debug_eval`        | ✅     |                                                   |
+| `get_fields`        | ✅     |                                                   |
+| `set_clipboard`     | ✅     | `xml` または `file` パラメータで入力              |
+| `generate_layout`   | ✅     | IPC → layout_gen → ファイル保存（XML はコンテキスト非通過）|
 
 ### C++ Plugin 側（IPC コマンド）
 

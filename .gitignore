@@ -26,3 +26,6 @@ fm-plugin/FileMakerMCP/build/
 
 # Windows
 Thumbs.db
+
+# Sample / test files
+sample.xml

@@ -1,7 +1,9 @@
 use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 
+mod clipboard;
 mod ipc;
+mod layout_gen;
 
 fn main() {
     let stdin = io::stdin();
@@ -66,9 +68,14 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-11-25",
                     "capabilities": {
-                        "tools": {}
+                        "tools": {},
+                        "extensions": {
+                            "io.modelcontextprotocol/ui": {
+                                "mimeTypes": ["text/html;profile=mcp-app"]
+                            }
+                        }
                     },
                     "serverInfo": {
                         "name": "filemaker-mcp",
@@ -140,54 +147,53 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                             }
                         },
                         {
-                            "name": "create_layout",
-                            "description": "フィールド情報とレイアウト設定から FileMaker レイアウト XML を生成してクリップボードに書き込む。",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "table": {
-                                        "type": "string",
-                                        "description": "テーブル名"
-                                    },
-                                    "fields": {
-                                        "type": "array",
-                                        "description": "get_fields で取得したフィールド配列（name, id を含む）",
-                                        "items": {"type": "object"}
-                                    },
-                                    "config": {
-                                        "type": "object",
-                                        "description": "layout_config.json の内容（省略時はデフォルト値を使用）"
-                                    }
-                                },
-                                "required": ["table", "fields"]
-                            }
-                        },
-                        {
                             "name": "set_clipboard",
-                            "description": "FileMaker レイアウト XML をクリップボードに書き込む。FileMaker で Cmd+V でペースト可能になる。",
+                            "description": "FileMaker の XML をクリップボードに書き込み、FileMaker で Cmd+V でペーストできる形式にします。xml または file のいずれかを指定してください。",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "xml": {
                                         "type": "string",
-                                        "description": "FileMaker レイアウト XML 文字列"
+                                        "description": "FileMaker 用のレイアウト XML 文字列"
+                                    },
+                                    "file": {
+                                        "type": "string",
+                                        "description": "XML を読み込むファイルパス（xml の代わりに指定可）"
                                     }
                                 },
-                                "required": ["xml"]
+                                "required": []
                             }
                         },
                         {
                             "name": "get_fields",
-                            "description": "指定テーブルのフィールド名・型一覧を取得する。",
+                            "description": "指定テーブルのフィールド名・型一覧を取得する。table を省略すると現在 FileMaker で開いているウィンドウのテーブルを対象にする。",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "table": {
                                         "type": "string",
-                                        "description": "対象テーブル名"
+                                        "description": "対象テーブルオカレンス名。省略時は現在のレイアウトのテーブルを使用。"
                                     }
                                 },
-                                "required": ["table"]
+                                "required": []
+                            }
+                        },
+                        {
+                            "name": "generate_layout",
+                            "description": "get_fields の結果をもとに FileMaker レイアウト XML（ラベル＋フィールドのペア）を生成しファイルに保存する。保存先パスを set_clipboard の file パラメータに渡すとクリップボードに送れる。",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "table": {
+                                        "type": "string",
+                                        "description": "対象テーブルオカレンス名。省略時は現在のレイアウトのテーブルを使用。"
+                                    },
+                                    "output_file": {
+                                        "type": "string",
+                                        "description": "保存先ファイルパス。省略時は /tmp/filemaker_layout_<table>.xml に自動保存。"
+                                    }
+                                },
+                                "required": []
                             }
                         }
                     ]
@@ -292,41 +298,18 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
             }
         }
 
-        "create_layout" => {
-            let table  = args["table"].as_str().unwrap_or("");
-            let empty  = vec![];
-            let fields: Vec<&Value> = args["fields"].as_array()
-                .unwrap_or(&empty)
-                .iter()
-                .collect();
-            let cfg = LayoutConfig::from_json(&args["config"]);
-            let xml = build_layout_xml(table, &fields, &cfg);
-
-            match ipc::send_to_plugin("set_clipboard", &json!({ "xml": xml })) {
-                Ok(resp) => {
-                    let text = if resp["status"] == "ok" {
-                        "クリップボードにコピーしました。FileMaker で Cmd+V でペーストしてください。".to_string()
-                    } else {
-                        format!("Plugin エラー: {}", resp["message"].as_str().unwrap_or("unknown error"))
-                    };
-                    tool_result(id, json!([{ "type": "text", "text": text }]))
-                }
-                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("Plugin 未接続: {e}") }])),
-            }
-        }
-
         "set_clipboard" => {
-            let xml = args["xml"].as_str().unwrap_or("");
-            match ipc::send_to_plugin("set_clipboard", &json!({ "xml": xml })) {
-                Ok(resp) => {
-                    let text = if resp["status"] == "ok" {
-                        resp["message"].as_str().unwrap_or("クリップボードにコピーしました").to_string()
-                    } else {
-                        format!("Plugin エラー: {}", resp["message"].as_str().unwrap_or("unknown error"))
-                    };
-                    tool_result(id, json!([{ "type": "text", "text": text }]))
+            let xml = if let Some(path) = args.get("file").and_then(|v| v.as_str()) {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(e) => return tool_result(id, json!([{ "type": "text", "text": format!("ファイル読み込み失敗: {e}") }])),
                 }
-                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("Plugin 未接続: {e}") }])),
+            } else {
+                args["xml"].as_str().unwrap_or("").to_string()
+            };
+            match clipboard::set_layout_xml(&xml) {
+                Ok(()) => tool_result(id, json!([{ "type": "text", "text": "クリップボードにコピーしました。FileMaker で Cmd+V してください。" }])),
+                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("クリップボードへの書き込み失敗: {e}") }])),
             }
         }
 
@@ -335,16 +318,55 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
             match ipc::send_to_plugin("get_fields", &json!({ "table": table })) {
                 Ok(resp) => {
                     if resp["status"] == "ok" {
-                        let fields = &resp["fields"];
-                        let text = format!(
-                            "テーブル {} のフィールド一覧:\n{}",
-                            table,
-                            serde_json::to_string_pretty(fields).unwrap()
-                        );
-                        tool_result(id, json!([{ "type": "text", "text": text }]))
+                        tool_result(id, json!([{ "type": "text", "text": serde_json::to_string_pretty(&resp).unwrap_or_default() }]))
                     } else {
                         let msg = resp["message"].as_str().unwrap_or("unknown error");
-                        tool_result(id, json!([{ "type": "text", "text": format!("Plugin エラー: {msg}") }]))
+                        let code = resp["code"].as_i64().map(|c| format!(" (code={c})")).unwrap_or_default();
+                        let tbl = resp["table"].as_str().map(|t| format!("\ntable: {t}")).unwrap_or_default();
+                        let base_tbl = resp["baseTable"].as_str().map(|t| format!("\nbaseTable: {t}")).unwrap_or_default();
+                        let file = resp["fileName"].as_str().map(|f| format!("\nfile: {f}")).unwrap_or_default();
+                        let sql = resp["sql"].as_str().map(|s| format!("\nsql: {s}")).unwrap_or_default();
+                        tool_result(id, json!([{ "type": "text", "text": format!("Plugin エラー: {msg}{code}{tbl}{base_tbl}{file}{sql}") }]))
+                    }
+                }
+                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("Plugin 未接続: {e}") }])),
+            }
+        }
+
+        "generate_layout" => {
+            let table = args["table"].as_str().unwrap_or("");
+            match ipc::send_to_plugin("get_fields", &json!({ "table": table })) {
+                Ok(resp) => {
+                    if resp["status"] != "ok" {
+                        let msg = resp["message"].as_str().unwrap_or("unknown error");
+                        return tool_result(id, json!([{ "type": "text", "text": format!("Plugin エラー: {msg}") }]));
+                    }
+                    let table_name = resp["table"].as_str().unwrap_or(table);
+                    let fields: Vec<layout_gen::FieldInfo> = resp["fields"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|f| {
+                            let name = f["name"].as_str()?;
+                            Some(layout_gen::FieldInfo {
+                                name: name.to_string(),
+                                id: f["id"].as_u64().unwrap_or(0),
+                                repetitions: f["repetitions"].as_u64().unwrap_or(1) as u32,
+                            })
+                        })
+                        .collect();
+                    if fields.is_empty() {
+                        return tool_result(id, json!([{ "type": "text", "text": "フィールドが見つかりませんでした。" }]));
+                    }
+                    let xml = layout_gen::generate(table_name, &fields);
+                    let path = args.get("output_file")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("/tmp/filemaker_layout_{table_name}.xml"));
+                    match std::fs::write(&path, &xml) {
+                        Ok(()) => tool_result(id, json!([{ "type": "text", "text": format!("{table_name} の {} フィールドを生成しました。\nファイル: {path}", fields.len()) }])),
+                        Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("ファイル書き込み失敗: {e}") }])),
                     }
                 }
                 Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("Plugin 未接続: {e}") }])),
@@ -360,117 +382,6 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
             }
         }),
     }
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
-}
-
-struct LayoutConfig {
-    start_y: f64,
-    row_stride: f64,
-    field_height: f64,
-    label_left: f64,
-    label_right: f64,
-    field_left: f64,
-    field_right: f64,
-    label_top_offset: f64,
-    label_bottom_offset: f64,
-}
-
-impl LayoutConfig {
-    fn from_json(v: &Value) -> Self {
-        let g = |k: &str, d: f64| v[k].as_f64().unwrap_or(d);
-        Self {
-            start_y:             g("start_y",             50.0),
-            row_stride:          g("row_stride",          47.0),
-            field_height:        g("field_height",        37.0),
-            label_left:          g("label_left",          50.0),
-            label_right:         g("label_right",         92.0),
-            field_left:          g("field_left",         103.0),
-            field_right:         g("field_right",        356.0),
-            label_top_offset:    g("label_top_offset",    6.0),
-            label_bottom_offset: g("label_bottom_offset", 5.0),
-        }
-    }
-}
-
-fn build_layout_xml(table: &str, fields: &[&Value], cfg: &LayoutConfig) -> String {
-    let n = fields.len();
-    let last_bottom = if n == 0 {
-        cfg.start_y + cfg.field_height
-    } else {
-        cfg.start_y + (n - 1) as f64 * cfg.row_stride + cfg.field_height
-    };
-
-    let mut objects = String::new();
-
-    for (i, field) in fields.iter().enumerate() {
-        let name     = field["name"].as_str().unwrap_or("");
-        let id       = field["id"].as_i64().unwrap_or(0);
-        let ft       = cfg.start_y + i as f64 * cfg.row_stride;  // field top
-        let fb       = ft + cfg.field_height;                      // field bottom
-        let lt       = ft + cfg.label_top_offset;                  // label top
-        let lb       = fb - cfg.label_bottom_offset;               // label bottom
-        let fkey     = i * 2 + 1;
-        let lkey     = i * 2 + 2;
-        let ename    = xml_escape(name);
-        let etable   = xml_escape(table);
-
-        objects.push_str(&format!(
-r#"    <Object type="Field" key="{fkey}" LabelKey="{lkey}" flags="0" rotation="0">
-      <Bounds top="{ft:.7}" left="{fl:.7}" bottom="{fb:.7}" right="{fr:.7}"/>
-      <FieldObj numOfReps="1" flags="0" inputMode="0" keyboardType="1" displayType="0" quickFind="1" pictFormat="5">
-        <Name>{etable}::{ename}</Name>
-        <DDRInfo>
-          <Field name="{ename}" id="{id}" repetition="1" maxRepetition="1" table="{etable}"/>
-        </DDRInfo>
-      </FieldObj>
-    </Object>
-    <Object type="Text" key="{lkey}" LabelKey="0" flags="0" rotation="0">
-      <Bounds top="{lt:.7}" left="{ll:.7}" bottom="{lb:.7}" right="{lr:.7}"/>
-      <TextObj flags="0">
-        <CharacterStyleVector>
-          <Style>
-            <Data>{ename}</Data>
-            <CharacterStyle mask="32695">
-              <Font-family codeSet="Other" fontId="4" postScript="HiraKakuProN-W3">Hiragino Kaku Gothic ProN</Font-family>
-              <Font-size>16</Font-size>
-              <Face>0</Face>
-              <Color>#282828</Color>
-            </CharacterStyle>
-          </Style>
-        </CharacterStyleVector>
-        <ParagraphStyleVector>
-          <Style>
-            <Data>{ename}</Data>
-            <ParagraphStyle mask="0">
-</ParagraphStyle>
-          </Style>
-        </ParagraphStyleVector>
-      </TextObj>
-    </Object>
-"#,
-            fkey = fkey, lkey = lkey,
-            ft = ft, fl = cfg.field_left, fb = fb, fr = cfg.field_right,
-            lt = lt, ll = cfg.label_left, lb = lb, lr = cfg.label_right,
-            etable = etable, ename = ename, id = id,
-        ));
-    }
-
-    format!(
-r#"<?xml version="1.0" encoding="UTF-8"?>
-<fmxmlsnippet type="LayoutObjectList">
-  <Layout enclosingRectTop="{sy:.7}" enclosingRectLeft="{ll:.7}" enclosingRectBottom="{lb:.7}" enclosingRectRight="{fr:.7}">
-{objects}  </Layout>
-</fmxmlsnippet>"#,
-        sy = cfg.start_y, ll = cfg.label_left,
-        lb = last_bottom, fr = cfg.field_right,
-        objects = objects,
-    )
 }
 
 fn tool_result(id: Value, content: Value) -> Value {

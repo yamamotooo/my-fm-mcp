@@ -593,103 +593,135 @@ static std::string GetRecordsJSON( const std::string& tableName, int limit )
 	return json;
 }
 
-// GetFieldsJSON: return field names, types, and repetitions for a given table ==============
+// GetFieldsJSON: return field names, types, and repetitions for a given table
+// tableName: テーブルオカレンス名（空の場合は現在のレイアウトのテーブルを使用）
+//            Table occurrence name (if empty, uses current layout table)
 
-static std::string GetFieldsJSON( const std::string& tableName )
+static std::string GetFieldsJSON( const std::string& tableName = "" )
 {
 	fmx::ExprEnvUniquePtr env;
 	FMX_SetToCurrentEnv( env.get() );
 
-	// Get the current database filename
-	fmx::DataUniquePtr fnResult;
-	fmx::TextUniquePtr fnExpr;
-	fnExpr->Assign( "GetValue ( DatabaseNames ; 1 )", fmx::Text::kEncoding_UTF8 );
-	if ( env->Evaluate( *fnExpr, *fnResult ) != 0 )
-		return "{\"status\":\"error\",\"message\":\"DatabaseNames failed\"}";
-	std::string fileName = FMXTextToUTF8( fnResult->GetAsText() );
-	fileName.erase( std::remove( fileName.begin(), fileName.end(), '\r' ), fileName.end() );
-	fileName.erase( std::remove( fileName.begin(), fileName.end(), '\n' ), fileName.end() );
+	// Get current layout table name (テーブルオカレンス)
+	fmx::DataUniquePtr layoutTableResult;
+	fmx::TextUniquePtr layoutTableExpr;
+	layoutTableExpr->Assign( "Get ( LayoutTableName )", fmx::Text::kEncoding_UTF8 );
+	std::string tableOccurrence;
+	if ( env->Evaluate( *layoutTableExpr, *layoutTableResult ) == 0 )
+	{
+		tableOccurrence = FMXTextToUTF8( layoutTableResult->GetAsText() );
+		tableOccurrence.erase( std::remove( tableOccurrence.begin(), tableOccurrence.end(), '\r' ), tableOccurrence.end() );
+		tableOccurrence.erase( std::remove( tableOccurrence.begin(), tableOccurrence.end(), '\n' ), tableOccurrence.end() );
+	}
 
-	// Get field names for the table
-	fmx::DataUniquePtr namesResult;
-	fmx::TextUniquePtr namesExpr;
-	std::string namesExprStr = "FieldNames ( \"" + fileName + "\" ; \"" + tableName + "\" )";
-	namesExpr->Assign( namesExprStr.c_str(), fmx::Text::kEncoding_UTF8 );
-	if ( env->Evaluate( *namesExpr, *namesResult ) != 0 )
-		return "{\"status\":\"error\",\"message\":\"FieldNames failed\"}";
+	// If tableName is provided, use it; otherwise use current layout table
+	if ( !tableName.empty() )
+		tableOccurrence = tableName;
 
-	std::vector<std::string> fieldNames = SplitLines( FMXTextToUTF8( namesResult->GetAsText() ) );
-	if ( fieldNames.empty() )
-		return "{\"status\":\"error\",\"message\":\"no fields found\"}";
+	if ( tableOccurrence.empty() )
+		return "{\"status\":\"error\",\"message\":\"No table name provided and Get(LayoutTableName) failed\"}";
 
-	// Get field IDs (same order as FieldNames)
-	fmx::DataUniquePtr idsResult;
-	fmx::TextUniquePtr idsExpr;
-	std::string idsExprStr = "FieldIDs ( \"" + fileName + "\" ; \"" + tableName + "\" )";
-	idsExpr->Assign( idsExprStr.c_str(), fmx::Text::kEncoding_UTF8 );
-	std::vector<std::string> fieldIds;
-	if ( env->Evaluate( *idsExpr, *idsResult ) == 0 )
-		fieldIds = SplitLines( FMXTextToUTF8( idsResult->GetAsText() ) );
+	// ExecuteSQL関数をEvaluate経由で実行（サブクエリを1回で実行）
+	// シングルクォートをエスケープ
+	std::string escapedTableName = tableOccurrence;
+	size_t pos = 0;
+	while ( (pos = escapedTableName.find( "'", pos )) != std::string::npos )
+	{
+		escapedTableName.replace( pos, 1, "''" );
+		pos += 2;
+	}
+	
+	// FileMakerのExecuteSQL関数を使ってサブクエリを実行
+	// 列を明示的に指定: TableOccurrenceName, FieldName, FieldType, FieldClass, FieldReps, FieldId
+	std::string fmCalc = 
+		"ExecuteSQL ( "
+		"\"SELECT "
+		"'" + tableOccurrence + "' AS TableOccurrenceName, "
+		"FieldName, "
+		"FieldType, "
+		"FieldClass, "
+		"FieldReps, "
+		"FieldId "
+		"FROM FileMaker_BaseTableFields "
+		"WHERE FileMaker_BaseTableFields.BaseTableName = ("
+		"  SELECT FileMaker_Tables.BaseTableName "
+		"  FROM FileMaker_Tables "
+		"  WHERE FileMaker_Tables.TableName = '" + escapedTableName + "'"
+		")\" ; "
+		"\"	\" ; "  // 列区切り（タブ）
+		"\"¶\" )";  // 行区切り（改行）
+	
+	fmx::DataUniquePtr sqlResult;
+	fmx::TextUniquePtr sqlExpr;
+	sqlExpr->Assign( fmCalc.c_str(), fmx::Text::kEncoding_UTF8 );
+	fmx::errcode err = env->Evaluate( *sqlExpr, *sqlResult );
+	
+	if ( err != 0 )
+	{
+		// Rustのデバッグメッセージ形式に合わせたエラーレスポンス
+		std::string errMsg = "{\"status\":\"error\","
+		                     "\"message\":\"SQL query failed\","
+		                     "\"code\":" + std::to_string( err ) + ","
+		                     "\"table\":\"" + JsonEscape( tableOccurrence ) + "\","
+		                     "\"baseTable\":\"\","
+		                     "\"fileName\":\"\","
+		                     "\"sql\":\"" + JsonEscape( fmCalc ) + "\"}";
+		return errMsg;
+	}
 
-	std::string json = "{\"status\":\"ok\",\"fields\":[";
+	// 結果を解析
+	std::string rawData = FMXTextToUTF8( sqlResult->GetAsText() );
+	std::vector<std::string> rows = SplitLines( rawData );
+	
+	if ( rows.empty() )
+		return "{\"status\":\"error\",\"message\":\"no fields found for table: " + JsonEscape( tableOccurrence ) + "\"}";
+
+	std::string json = "{\"status\":\"ok\",\"table\":\"" + JsonEscape( tableOccurrence ) + "\",\"fields\":[";
 	bool first = true;
 
-	for ( size_t fi = 0; fi < fieldNames.size(); ++fi )
+	for ( const auto& rowStr : rows )
 	{
-		const auto& fieldName = fieldNames[fi];
-		std::string fieldId = (fi < fieldIds.size()) ? fieldIds[fi] : "0";
-		// FieldType() returns "FieldClass, DataType" e.g. "Normal, Text" / "Calculated, Number"
-		fmx::DataUniquePtr typeResult;
-		fmx::TextUniquePtr typeExpr;
-		std::string typeExprStr = "FieldType ( \"" + fileName + "\" ; \"" + fieldName + "\" )";
-		typeExpr->Assign( typeExprStr.c_str(), fmx::Text::kEncoding_UTF8 );
-
-		std::string fieldType = "Text";
-		if ( env->Evaluate( *typeExpr, *typeResult ) == 0 )
+		// タブ区切りで分割（6列: TableOccurrenceName, FieldName, FieldType, FieldClass, FieldReps, FieldId）
+		std::vector<std::string> cols;
+		std::string col;
+		for ( char c : rowStr )
 		{
-			std::string raw = FMXTextToUTF8( typeResult->GetAsText() );
-			while ( !raw.empty() && ( raw.back() == '\r' || raw.back() == '\n' ) )
-				raw.pop_back();
-
-			// FieldType() returns space-separated tokens: "Standard Text Unindexed 1"
-			// Token[0]: Standard | Calculated | Summary | Global
-			// Token[1]: Text | Number | Date | Time | Timestamp | Container
-			auto sp1 = raw.find( ' ' );
-			if ( sp1 != std::string::npos )
-			{
-				std::string fieldClass = raw.substr( 0, sp1 );
-				auto sp2 = raw.find( ' ', sp1 + 1 );
-				std::string dataType = (sp2 != std::string::npos)
-				                     ? raw.substr( sp1 + 1, sp2 - sp1 - 1 )
-				                     : raw.substr( sp1 + 1 );
-				if      ( fieldClass == "Calculated" ) fieldType = "Calculation";
-				else if ( fieldClass == "Summary"    ) fieldType = "Summary";
-				else                                   fieldType = dataType;
-			}
-			else
-			{
-				fieldType = raw;
-			}
+			if ( c == '\t' ) { cols.push_back( col ); col.clear(); }
+			else             col += c;
 		}
+		cols.push_back( col );
 
-		// FieldRepetitions() returns the number of repetitions defined for the field
-		fmx::DataUniquePtr repResult;
-		fmx::TextUniquePtr repExpr;
-		std::string repExprStr = "FieldRepetitions ( \"" + fileName + "\" ; \"" + fieldName + "\" )";
-		repExpr->Assign( repExprStr.c_str(), fmx::Text::kEncoding_UTF8 );
+		if ( cols.empty() || cols[0].empty() ) continue;
 
-		int repetitions = 1;
-		if ( env->Evaluate( *repExpr, *repResult ) == 0 )
-		{
-			std::string raw = FMXTextToUTF8( repResult->GetAsText() );
-			try { repetitions = std::stoi( raw ); } catch ( ... ) {}
-		}
+		std::string tableOccurrenceName = cols[0];
+		std::string fieldName = (cols.size() > 1) ? cols[1] : "";
+		std::string fieldType = (cols.size() > 2) ? cols[2] : "varchar";
+		std::string fieldClass = (cols.size() > 3) ? cols[3] : "Normal";
+		int repetitions = (cols.size() > 4) ? std::atoi( cols[4].c_str() ) : 1;
+		std::string fieldId = (cols.size() > 5) ? cols[5] : "0";
+
+		// FieldType を FileMaker の型名に変換
+		// "varchar" → "Text", "decimal" → "Number", "timestamp" → "Timestamp" など
+		std::string displayType = fieldType;
+		if ( fieldType.find( "varchar" ) == 0 ) displayType = "Text";
+		else if ( fieldType.find( "decimal" ) == 0 ) displayType = "Number";
+		else if ( fieldType == "timestamp" ) displayType = "Timestamp";
+		else if ( fieldType == "date" ) displayType = "Date";
+		else if ( fieldType == "time" ) displayType = "Time";
+		else if ( fieldType.find( "binary" ) == 0 ) displayType = "Container";
+
+		// FieldClass が "Calculated" または "Summary" の場合は型を上書き
+		if ( fieldClass == "Calculated" || fieldClass == "Calculation" )
+			displayType = "Calculation";
+		else if ( fieldClass == "Summary" )
+			displayType = "Summary";
 
 		if ( !first ) json += ',';
 		first = false;
-		json += "{\"name\":\"" + JsonEscape( fieldName ) + "\","
+		json += "{\"tableOccurrence\":\"" + JsonEscape( tableOccurrenceName ) + "\","
+		      + "\"name\":\"" + JsonEscape( fieldName ) + "\","
 		      + "\"id\":" + fieldId + ","
-		      + "\"type\":\"" + JsonEscape( fieldType )  + "\","
+		      + "\"type\":\"" + JsonEscape( displayType )  + "\","
 		      + "\"repetitions\":" + std::to_string( repetitions ) + "}";
 	}
 

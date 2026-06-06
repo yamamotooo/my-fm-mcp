@@ -5,13 +5,12 @@
 ```
 filemaker-mcp-workspace/
 ├── CLAUDE.md
-├── docs/
-│   └── layout-feature.md        ← レイアウト自動生成機能の仕様
 ├── mcp-server/                  ← Rust (MCP Server)
 │   ├── Cargo.toml
 │   └── src/
 │       ├── main.rs              ← JSON-RPC 2.0 ハンドラ、ツール定義
-│       └── ipc.rs               ← IPC クライアント (Unix: UDS / Windows: Named Pipe)
+│       ├── ipc.rs               ← IPC クライアント (Unix: UDS / Windows: Named Pipe)
+│       └── clipboard.rs         ← クリップボード書き込み (macOS/Windows 直接実装)
 └── fm-plugin/                   ← C++ FileMaker Plugin
     ├── Headers/FMWrapper/       ← FileMaker SDK ヘッダ
     └── FileMakerMCP/FileMakerMCP/
@@ -25,6 +24,11 @@ Claude Desktop
   │  stdin/stdout (JSON-RPC 2.0)
   ▼
 mcp-server (Rust バイナリ)
+  │  set_clipboard → clipboard.rs で OS API を直接呼び出し
+  │                  macOS: NSPasteboard (UTI: dyn.ah62d4rv4gk8zuxnqgk)
+  │                  Windows: RegisterClipboardFormat("Mac-XML2") + 4byte header
+  │
+  │  get_fields / get_tables / ping →
   │  macOS/Linux: Unix Domain Socket  /tmp/filemaker_mcp.sock
   │  Windows:     Named Pipe          \\.\pipe\filemaker_mcp
   ▼
@@ -46,28 +50,43 @@ fm-plugin (C++ .fmplugin / .fmx64)  ← FileMaker Pro に読み込まれる
 
 ## MCP ツール一覧
 
-| ツール名           | 説明                                       |
-|--------------------|--------------------------------------------|
-| `hello_filemaker`  | Plugin に ping を送り疎通状態を返す        |
-| `get_tables`       | 現在開いている FM ファイルのテーブル一覧   |
-| `get_fields`       | 指定テーブルのフィールド名・型一覧を取得   |
-| `set_clipboard`    | FileMaker レイアウト XML をクリップボードに書き込む |
+| ツール名           | 処理場所          | 説明                                                   |
+|--------------------|-------------------|--------------------------------------------------------|
+| `hello_filemaker`  | IPC → Plugin      | Plugin に ping を送り疎通状態を返す                    |
+| `get_tables`       | IPC → Plugin      | 現在開いている FM ファイルのテーブル一覧               |
+| `get_records`      | IPC → Plugin      | 指定テーブルのレコード一覧を返す                       |
+| `debug_eval`       | IPC → Plugin      | 任意の FileMaker 計算式を評価して結果を返す（デバッグ用）|
+| `get_fields`       | IPC → Plugin      | 指定テーブルのフィールド名・型一覧を取得               |
+| `set_clipboard`    | Rust 直接         | FileMaker レイアウト XML をクリップボードに書き込む    |
 
-## 実装済みコマンド
+## 実装状況
 
-| command        | 説明                                              |
-|----------------|---------------------------------------------------|
-| `ping`         | 疎通確認。`{"status":"ok","message":"pong"}` を返す |
-| `get_tables`   | `TableNames(Get(FileName))` を評価してテーブル一覧を返す |
+### Rust 側（実装済み）
 
-## 実装予定コマンド
+| ツール         | 状態   |
+|----------------|--------|
+| `hello_filemaker` | ✅ |
+| `get_tables`   | ✅     |
+| `get_records`  | ✅     |
+| `debug_eval`   | ✅     |
+| `get_fields`   | ✅     |
+| `set_clipboard`| ✅（OS API 直接呼び出し）|
 
-| command        | 説明                          |
-|----------------|-------------------------------|
-| `get_fields`   | 指定テーブルのフィールド情報を返す |
-| `set_clipboard`| XML をクリップボードに書き込む   |
+### C++ Plugin 側（IPC コマンド）
 
-詳細仕様: @docs/layout-feature.md
+| command        | 状態   | 説明                                                              |
+|----------------|--------|-------------------------------------------------------------------|
+| `ping`         | ✅     | `{"status":"ok","message":"pong"}` を返す                        |
+| `get_tables`   | ✅     | `TableNames(Get(FileName))` を評価してテーブル一覧を返す          |
+| `get_records`  | ✅     | 指定テーブルのレコード一覧を返す                                  |
+| `evaluate`     | ✅     | 任意の計算式を評価して結果を返す                                  |
+| `get_fields`   | ✅     | `ExecuteSQL` で `FileMaker_BaseTableFields` からフィールド名・型・繰り返し数を取得 |
+
+`get_fields` の C++ 実装（`GetFieldsJSON`）:
+- `ExecuteFileSQLTextResult` で `FileMaker_BaseTableFields` を `FileMaker_Tables` とサブクエリ結合し、テーブルオカレンス名からベーステーブルのフィールド一覧を取得
+- 引数 `table`（テーブルオカレンス名）が空の場合は `Get(LayoutTableName)` で現在のレイアウトのテーブルを使用
+- `kFMXT_Idle` 内で処理（FM 主スレッドのみ API 呼び出し可）
+- レスポンス形式: `{"status":"ok","table":"...","fields":[{"name":"...","id":1,"type":"Text","repetitions":1}, ...]}`
 
 ## get_tables のデータフロー
 

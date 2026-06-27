@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 
+mod ax_navigate;
 mod clipboard;
 mod ipc;
 mod layout_gen;
@@ -195,6 +196,20 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                                 },
                                 "required": []
                             }
+                        },
+                        {
+                            "name": "navigate_to_feature",
+                            "description": "FileMaker のヘルプメニューにキーワードを入力し、対応するメニュー項目をハイライトして機能の場所をユーザーに示す。macOS のアクセシビリティ API を使用するため、システム設定でのアクセシビリティ権限が必要。",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "keyword": {
+                                        "type": "string",
+                                        "description": "ヘルプ検索フィールドに入力するキーワード（例: 'レイアウト管理'）"
+                                    }
+                                },
+                                "required": ["keyword"]
+                            }
                         }
                     ]
                 }
@@ -370,6 +385,17 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
                     }
                 }
                 Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("Plugin 未接続: {e}") }])),
+            }
+        }
+
+        "navigate_to_feature" => {
+            let keyword = args["keyword"].as_str().unwrap_or("");
+            if keyword.is_empty() {
+                return tool_result(id, json!([{ "type": "text", "text": "keyword が空です" }]));
+            }
+            match ax_navigate::focus_help_search(keyword) {
+                Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
+                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("ナビゲーション失敗: {e}") }])),
             }
         }
 

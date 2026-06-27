@@ -1,11 +1,13 @@
-/// FileMaker のヘルプメニュー検索を使い、機能の場所をメニュー上でハイライトする
-pub fn focus_help_search(keyword: &str) -> Result<String, String> {
+/// FileMaker のヘルプメニュー検索を使い、機能の場所をメニュー上でハイライトする。
+/// keyword で検索し、結果の中から menu_item に一致する行を選択する。
+/// menu_item が空の場合は最初の行を選択する。
+pub fn focus_help_search(keyword: &str, menu_item: &str) -> Result<String, String> {
     #[cfg(target_os = "macos")]
-    return focus_help_search_macos(keyword);
+    return focus_help_search_macos(keyword, menu_item);
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = keyword;
+        let _ = (keyword, menu_item);
         Err("この機能は macOS のみサポートされています".to_string())
     }
 }
@@ -15,7 +17,7 @@ pub fn focus_help_search(keyword: &str) -> Result<String, String> {
 extern "C" {}
 
 #[cfg(target_os = "macos")]
-fn focus_help_search_macos(keyword: &str) -> Result<String, String> {
+fn focus_help_search_macos(keyword: &str, menu_item: &str) -> Result<String, String> {
     use accessibility_sys::*;
     use core_foundation::array::{kCFTypeArrayCallBacks, CFArrayCreate};
     use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
@@ -87,17 +89,40 @@ fn focus_help_search_macos(keyword: &str) -> Result<String, String> {
         // 検索結果が出るまで待つ
         std::thread::sleep(std::time::Duration::from_millis(600));
 
-        // 検索フィールドの兄弟テーブルから最初の行を選択（メニュー上でハイライト）
+        // 検索フィールドの兄弟テーブルから対象行を選択（メニュー上でハイライト）
         let mut selected_title: Option<String> = None;
+        let mut all_candidates: Vec<String> = Vec::new();
+
         if let Some(parent_cf) = ax_copy_attr(search_field, "AXParent") {
             let parent = parent_cf.as_CFTypeRef() as AXUIElementRef;
             let siblings = ax_children_raw(parent);
             if siblings.len() >= 2 {
                 let table = siblings[1];
                 let rows = ax_children_raw(table);
-                if !rows.is_empty() {
-                    selected_title = ax_get_string(rows[0], "AXTitle");
-                    let row_ref = rows[0] as CFTypeRef;
+
+                // 各行のテキストを収集（行自体 → 子 → 孫の順に試す）
+                let row_texts: Vec<(AXUIElementRef, String)> = rows
+                    .iter()
+                    .copied()
+                    .filter_map(|row| ax_row_text(row).map(|t| (row, t)))
+                    .collect();
+
+                all_candidates = row_texts.iter().map(|(_, t)| t.clone()).collect();
+
+                // menu_item が指定されていれば部分一致で探す、空なら先頭行
+                let target = if menu_item.is_empty() {
+                    row_texts.first().map(|(r, t)| (*r, t.clone()))
+                } else {
+                    row_texts
+                        .iter()
+                        .find(|(_, t)| t.contains(menu_item))
+                        .map(|(r, t)| (*r, t.clone()))
+                        .or_else(|| row_texts.first().map(|(r, t)| (*r, t.clone())))
+                };
+
+                if let Some((row, title)) = target {
+                    selected_title = Some(title);
+                    let row_ref = row as CFTypeRef;
                     let sel_attr = CFString::new("AXSelectedRows");
                     let arr = CFArrayCreate(std::ptr::null(), &row_ref, 1, &kCFTypeArrayCallBacks);
                     AXUIElementSetAttributeValue(table, sel_attr.as_concrete_TypeRef(), arr as CFTypeRef);
@@ -108,17 +133,57 @@ fn focus_help_search_macos(keyword: &str) -> Result<String, String> {
 
         CFRelease(app as CFTypeRef);
 
+        let candidates_str = if all_candidates.is_empty() {
+            String::new()
+        } else {
+            format!("\n候補: {}", all_candidates.join(" / "))
+        };
+
         match selected_title {
             Some(title) => Ok(format!(
-                "「{}」でヘルプ検索し、「{}」をハイライトしました。FileMaker のメニューに移動先が表示されます。",
-                keyword, title
+                "「{}」で検索し「{}」をハイライトしました。{}",
+                keyword, title, candidates_str
             )),
             None => Ok(format!(
-                "「{}」でヘルプ検索しました（一致する結果がありませんでした）。",
-                keyword
+                "「{}」で検索しましたが一致する項目がありませんでした。{}",
+                keyword, candidates_str
             )),
         }
     }
+}
+
+/// 行のテキストを AXTitle / AXValue → 子要素 → 孫要素の順に試みて取得する
+#[cfg(target_os = "macos")]
+unsafe fn ax_row_text(row: accessibility_sys::AXUIElementRef) -> Option<String> {
+    // 行自体の属性
+    for attr in &["AXTitle", "AXValue"] {
+        if let Some(t) = ax_get_string(row, attr) {
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    // 子要素（AXCell など）
+    for child in ax_children_raw(row) {
+        for attr in &["AXTitle", "AXValue"] {
+            if let Some(t) = ax_get_string(child, attr) {
+                if !t.is_empty() {
+                    return Some(t);
+                }
+            }
+        }
+        // 孫要素（AXStaticText など）
+        for grandchild in ax_children_raw(child) {
+            for attr in &["AXTitle", "AXValue"] {
+                if let Some(t) = ax_get_string(grandchild, attr) {
+                    if !t.is_empty() {
+                        return Some(t);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]

@@ -199,13 +199,17 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                         },
                         {
                             "name": "navigate_to_feature",
-                            "description": "FileMaker のヘルプメニューにキーワードを入力し、対応するメニュー項目をハイライトして機能の場所をユーザーに示す。macOS のアクセシビリティ API を使用するため、システム設定でのアクセシビリティ権限が必要。",
+                            "description": "FileMaker のヘルプメニューに keyword を入力して検索し、結果の中から menu_item に一致する行をハイライトして機能の場所をユーザーに示す。macOS のアクセシビリティ API を使用するため、システム設定でのアクセシビリティ権限が必要。",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "keyword": {
                                         "type": "string",
                                         "description": "ヘルプ検索フィールドに入力するキーワード（例: 'レイアウト管理'）"
+                                    },
+                                    "menu_item": {
+                                        "type": "string",
+                                        "description": "検索結果の中からハイライトしたいメニュー項目のテキスト（例: 'レイアウトの管理'）。省略または空の場合は先頭の結果を選択する。"
                                     }
                                 },
                                 "required": ["keyword"]
@@ -393,7 +397,8 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
             if keyword.is_empty() {
                 return tool_result(id, json!([{ "type": "text", "text": "keyword が空です" }]));
             }
-            match ax_navigate::focus_help_search(keyword) {
+            let menu_item = args["menu_item"].as_str().unwrap_or("");
+            match ax_navigate::focus_help_search(keyword, menu_item) {
                 Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
                 Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("ナビゲーション失敗: {e}") }])),
             }

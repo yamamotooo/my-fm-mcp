@@ -17,9 +17,31 @@ pub fn focus_help_search(keyword: &str, menu_item: &str) -> Result<String, Strin
 extern "C" {}
 
 #[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventCreateKeyboardEvent(
+        source: *const std::ffi::c_void,
+        keycode: u16,
+        keydown: bool,
+    ) -> *mut std::ffi::c_void;
+    fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+}
+
+/// キーコードを HID キューへ送信する
+#[cfg(target_os = "macos")]
+unsafe fn post_key_event(keycode: u16) {
+    use core_foundation::base::CFTypeRef;
+    let down = CGEventCreateKeyboardEvent(std::ptr::null(), keycode, true);
+    CGEventPost(0, down);
+    core_foundation::base::CFRelease(down as CFTypeRef);
+    let up = CGEventCreateKeyboardEvent(std::ptr::null(), keycode, false);
+    CGEventPost(0, up);
+    core_foundation::base::CFRelease(up as CFTypeRef);
+}
+
+#[cfg(target_os = "macos")]
 fn focus_help_search_macos(keyword: &str, menu_item: &str) -> Result<String, String> {
     use accessibility_sys::*;
-    use core_foundation::array::{kCFTypeArrayCallBacks, CFArrayCreate};
     use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
     use core_foundation::string::CFString;
     use objc::runtime::Object;
@@ -101,32 +123,35 @@ fn focus_help_search_macos(keyword: &str, menu_item: &str) -> Result<String, Str
                 let rows = ax_children_raw(table);
 
                 // 各行のテキストを収集（行自体 → 子 → 孫の順に試す）
-                let row_texts: Vec<(AXUIElementRef, String)> = rows
+                let row_texts: Vec<String> = rows
                     .iter()
                     .copied()
-                    .filter_map(|row| ax_row_text(row).map(|t| (row, t)))
+                    .filter_map(|row| ax_row_text(row))
                     .collect();
 
-                all_candidates = row_texts.iter().map(|(_, t)| t.clone()).collect();
+                all_candidates = row_texts.clone();
 
                 // menu_item が指定されていれば部分一致で探す、空なら先頭行
-                let target = if menu_item.is_empty() {
-                    row_texts.first().map(|(r, t)| (*r, t.clone()))
+                let target_idx = if menu_item.is_empty() {
+                    if row_texts.is_empty() { None } else { Some(0) }
                 } else {
-                    row_texts
-                        .iter()
-                        .find(|(_, t)| t.contains(menu_item))
-                        .map(|(r, t)| (*r, t.clone()))
-                        .or_else(|| row_texts.first().map(|(r, t)| (*r, t.clone())))
+                    row_texts.iter().position(|t| t.contains(menu_item))
+                        .or_else(|| if row_texts.is_empty() { None } else { Some(0) })
                 };
 
-                if let Some((row, title)) = target {
-                    selected_title = Some(title);
-                    let row_ref = row as CFTypeRef;
-                    let sel_attr = CFString::new("AXSelectedRows");
-                    let arr = CFArrayCreate(std::ptr::null(), &row_ref, 1, &kCFTypeArrayCallBacks);
-                    AXUIElementSetAttributeValue(table, sel_attr.as_concrete_TypeRef(), arr as CFTypeRef);
-                    CFRelease(arr as CFTypeRef);
+                if let Some(idx) = target_idx {
+                    selected_title = row_texts.get(idx).cloned();
+                    // AXSelectedRows はメニュートラッキングモードを破壊するため使わない。
+                    // Arrow Down を押すと検索フィールドから結果テーブル先頭行へフォーカスが移る。
+                    // 続けて Arrow Down を繰り返し目的行まで移動する。
+                    // ユーザーは Enter で実行 / Escape で閉じを自由に選べる。
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // 1回目: 検索フィールド → 結果テーブル先頭行（index 0 がハイライト）
+                    post_key_event(125); // Arrow Down
+                    for _ in 0..idx {
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                        post_key_event(125); // Arrow Down: 次の行へ
+                    }
                 }
             }
         }

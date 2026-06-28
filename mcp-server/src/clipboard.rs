@@ -41,7 +41,6 @@ fn detect_format(xml: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// macOS: NSPasteboard へ FileMaker XML を書き込む
 #[cfg(target_os = "macos")]
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {}

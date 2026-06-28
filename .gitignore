@@ -29,3 +29,6 @@ Thumbs.db
 
 # Sample / test files
 sample.xml
+
+# RFP / development specs (not for version control)
+mcp-server/rfp/

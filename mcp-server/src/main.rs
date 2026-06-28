@@ -7,6 +7,13 @@ mod ipc;
 mod layout_gen;
 
 fn main() {
+    // デバッグ CLI モード: cargo run -- <operations.json>
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 {
+        run_debug_operations(&args[1]);
+        return;
+    }
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -214,6 +221,42 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                                 },
                                 "required": ["keyword"]
                             }
+                        },
+                        {
+                            "name": "await_for_user_interaction",
+                            "description": "FileMaker のダイアログが開くのを待機する。ユーザーが操作してダイアログを開いたことを検出したら次のステップへ進む。macOS のアクセシビリティ API を使用。",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "dialog_title": {
+                                        "type": "string",
+                                        "description": "待機対象ダイアログのタイトル（部分一致）。空の場合は任意のダイアログを検出する。"
+                                    },
+                                    "timeout_sec": {
+                                        "type": "number",
+                                        "description": "タイムアウト秒数（デフォルト 30）"
+                                    }
+                                },
+                                "required": []
+                            }
+                        },
+                        {
+                            "name": "highlight_to_feature",
+                            "description": "現在開いているダイアログ内の要素を Accessibility API で探し、その周囲を赤枠で 3 秒間強調表示する。tab_name を指定するとタブを切り替えてから検索する。macOS のアクセシビリティ API を使用。",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "tab_name": {
+                                        "type": "string",
+                                        "description": "切り替えるタブ名（例: 'テーブル'）。省略時はタブ切り替えをしない。"
+                                    },
+                                    "element_name": {
+                                        "type": "string",
+                                        "description": "強調表示する要素名（AXTitle / AXDescription で部分一致）"
+                                    }
+                                },
+                                "required": ["element_name"]
+                            }
                         }
                     ]
                 }
@@ -398,9 +441,30 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
                 return tool_result(id, json!([{ "type": "text", "text": "keyword が空です" }]));
             }
             let menu_item = args["menu_item"].as_str().unwrap_or("");
-            match ax_navigate::focus_help_search(keyword, menu_item) {
+            match ax_navigate::navigate_to_feature(keyword, menu_item) {
                 Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
                 Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("ナビゲーション失敗: {e}") }])),
+            }
+        }
+
+        "await_for_user_interaction" => {
+            let dialog_title = args["dialog_title"].as_str().unwrap_or("");
+            let timeout_sec = args["timeout_sec"].as_u64().unwrap_or(30);
+            match ax_navigate::await_for_user_interaction(dialog_title, timeout_sec) {
+                Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
+                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("待機タイムアウト: {e}") }])),
+            }
+        }
+
+        "highlight_to_feature" => {
+            let tab_name = args["tab_name"].as_str().filter(|s| !s.is_empty());
+            let element_name = args["element_name"].as_str().unwrap_or("");
+            if element_name.is_empty() {
+                return tool_result(id, json!([{ "type": "text", "text": "element_name が空です" }]));
+            }
+            match ax_navigate::highlight_to_feature(tab_name, element_name) {
+                Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
+                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("強調表示失敗: {e}") }])),
             }
         }
 
@@ -423,4 +487,78 @@ fn tool_result(id: Value, content: Value) -> Value {
             "content": content
         }
     })
+}
+
+/// rfp/operations/*.json を直接実行するデバッグ CLI モード。
+/// cargo run -- rfp/operations/define_table.json
+fn run_debug_operations(json_path: &str) {
+    let content = match std::fs::read_to_string(json_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ファイル読み込み失敗: {json_path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let ops: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("JSON パースエラー: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let steps = match ops["steps"].as_array() {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("steps フィールドがありません");
+            std::process::exit(1);
+        }
+    };
+
+    println!("[debug] {} ステップを実行: {json_path}", steps.len());
+
+    for (i, step) in steps.iter().enumerate() {
+        let tool = step["tool"].as_str().unwrap_or("(unknown)");
+        let args = &step["args"];
+        let after = step["after"].as_str();
+
+        println!("\n[{}/{}] {tool}", i + 1, steps.len());
+        if args != &Value::Null {
+            println!("  args: {args}");
+        }
+
+        let result = match tool {
+            "navigate_to_feature" => {
+                let keyword = args["keyword"].as_str().unwrap_or("");
+                let menu_item = args["menu_item"].as_str().unwrap_or("");
+                ax_navigate::navigate_to_feature(keyword, menu_item)
+            }
+            "await_for_user_interaction" => {
+                let dialog_title = args["dialog_title"].as_str().unwrap_or("");
+                let timeout_sec = args["timeout_sec"].as_u64().unwrap_or(30);
+                ax_navigate::await_for_user_interaction(dialog_title, timeout_sec)
+            }
+            "highlight_to_feature" => {
+                let tab_name = args["tab_name"].as_str().filter(|s| !s.is_empty());
+                let element_name = args["element_name"].as_str().unwrap_or("");
+                ax_navigate::highlight_to_feature(tab_name, element_name)
+            }
+            unknown => Err(format!("未知のツール: {unknown}")),
+        };
+
+        match result {
+            Ok(msg) => println!("  OK: {msg}"),
+            Err(e) => {
+                eprintln!("  ERROR: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        if let Some(msg) = after {
+            println!("  → {msg}");
+        }
+    }
+
+    println!("\n[debug] 完了");
 }

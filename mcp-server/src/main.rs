@@ -282,6 +282,10 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                                     "element_name": {
                                         "type": "string",
                                         "description": "強調表示する要素名（AXTitle / AXDescription で部分一致）"
+                                    },
+                                    "element_type": {
+                                        "type": "string",
+                                        "description": "要素の種類（例: 'ボタン', 'テキストフィールド', 'チェックボックス'）。省略時は種類を問わず名前で検索。AXRole 文字列（'AXButton' など）でも指定可。"
                                     }
                                 },
                                 "required": ["element_name"]
@@ -488,10 +492,11 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
         "highlight_to_feature" => {
             let tab_name = args["tab_name"].as_str().filter(|s| !s.is_empty());
             let element_name = args["element_name"].as_str().unwrap_or("");
+            let element_type = args["element_type"].as_str().filter(|s| !s.is_empty());
             if element_name.is_empty() {
                 return tool_result(id, json!([{ "type": "text", "text": "element_name が空です" }]));
             }
-            match ax_navigate::highlight_to_feature(tab_name, element_name) {
+            match ax_navigate::highlight_to_feature(tab_name, element_name, element_type) {
                 Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
                 Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("強調表示失敗: {e}") }])),
             }
@@ -550,7 +555,8 @@ fn execute_operations_steps(steps: &[Value]) -> Result<String, String> {
             "highlight_to_feature" => {
                 let tab_name = args["tab_name"].as_str().filter(|s| !s.is_empty());
                 let element_name = args["element_name"].as_str().unwrap_or("");
-                ax_navigate::highlight_to_feature(tab_name, element_name)
+                let element_type = args["element_type"].as_str().filter(|s| !s.is_empty());
+                ax_navigate::highlight_to_feature(tab_name, element_name, element_type)
             }
             unknown => Err(format!("未知のツール: {unknown}")),
         }?;

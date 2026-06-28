@@ -370,13 +370,13 @@ fn await_for_user_interaction_macos(dialog_title: &str, timeout_sec: u64) -> Res
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Accessibility API で要素座標を取得し、周囲を透明ウィンドウで 3 秒間強調表示する。
-pub fn highlight_to_feature(tab_name: Option<&str>, element_name: &str) -> Result<String, String> {
+pub fn highlight_to_feature(tab_name: Option<&str>, element_name: &str, element_type: Option<&str>) -> Result<String, String> {
     #[cfg(target_os = "macos")]
-    return highlight_to_feature_macos(tab_name, element_name);
+    return highlight_to_feature_macos(tab_name, element_name, element_type);
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (tab_name, element_name);
+        let _ = (tab_name, element_name, element_type);
         Err("この機能は macOS のみサポートされています".to_string())
     }
 }
@@ -392,7 +392,7 @@ extern "C" {
 }
 
 #[cfg(target_os = "macos")]
-fn highlight_to_feature_macos(tab_name: Option<&str>, element_name: &str) -> Result<String, String> {
+fn highlight_to_feature_macos(tab_name: Option<&str>, element_name: &str, element_type: Option<&str>) -> Result<String, String> {
     use accessibility_sys::*;
     use core_foundation::base::{CFRelease, CFTypeRef};
 
@@ -413,7 +413,8 @@ fn highlight_to_feature_macos(tab_name: Option<&str>, element_name: &str) -> Res
         }
 
         // BFS で要素を探す
-        let element = ax_bfs_find_element(dialog, element_name)
+        let ax_role = element_type.map(ax_role_from_japanese);
+        let element = ax_bfs_find_element(dialog, element_name, ax_role)
             .ok_or_else(|| format!("要素が見つかりません: {element_name}"))?;
 
         // 座標取得
@@ -489,18 +490,53 @@ unsafe fn ax_switch_tab(
     Err(format!("タブが見つかりません: {tab_name}"))
 }
 
+/// 日本語の要素タイプ名を AXRole 文字列に変換する。
+/// "AX" で始まる文字列はそのまま返す（英語直指定も許容）。
+fn ax_role_from_japanese(name: &str) -> &str {
+    if name.starts_with("AX") {
+        return name;
+    }
+    match name {
+        "ボタン"                           => "AXButton",
+        "テキストフィールド" | "テキスト入力" => "AXTextField",
+        "チェックボックス"                  => "AXCheckBox",
+        "ラジオボタン"                      => "AXRadioButton",
+        "ポップアップ" | "ポップアップボタン" => "AXPopUpButton",
+        "コンボボックス"                    => "AXComboBox",
+        "リスト"                           => "AXList",
+        "テーブル"                         => "AXTable",
+        "スタティックテキスト" | "ラベル"   => "AXStaticText",
+        "グループ"                         => "AXGroup",
+        "スクロールエリア"                  => "AXScrollArea",
+        "スライダー"                        => "AXSlider",
+        "スピナー" | "インクリメンタル"     => "AXIncrementor",
+        other                              => other,
+    }
+}
+
 /// root 以下を BFS で走査し element_name に部分一致する要素を返す。
 /// AXTitle / AXDescription / AXLabel / AXValue の順に照合する。
+/// element_role が Some のとき AXRole も一致した要素のみを返す。
 #[cfg(target_os = "macos")]
 unsafe fn ax_bfs_find_element(
     root: accessibility_sys::AXUIElementRef,
     name: &str,
+    element_role: Option<&str>,
 ) -> Option<accessibility_sys::AXUIElementRef> {
     let mut queue = vec![root];
     let mut visited = 0usize;
     while !queue.is_empty() && visited < 5000 {
         let elem = queue.remove(0);
         visited += 1;
+
+        // element_role が指定されていれば AXRole が一致する要素だけ照合する
+        if let Some(role) = element_role {
+            if ax_get_string(elem, "AXRole").as_deref() != Some(role) {
+                queue.extend(ax_children_raw(elem));
+                continue;
+            }
+        }
+
         for attr in &["AXTitle", "AXDescription", "AXLabel", "AXValue"] {
             if ax_get_string(elem, attr)
                 .map(|t| t.contains(name))

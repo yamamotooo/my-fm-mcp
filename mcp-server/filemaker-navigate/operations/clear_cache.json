@@ -10,7 +10,7 @@
     },
     {
       "tool": "highlight_to_feature",
-      "args": { "tab_name": "一般", "element_name": "高度なツールを使用する", "element_type": "AXCheckBox" }
+      "args": { "tab_name": "一般", "element_name": "削除", "element_type": "AXButton" }
     }
   ]
 }

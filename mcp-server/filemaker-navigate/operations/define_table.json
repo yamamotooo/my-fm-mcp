@@ -11,7 +11,11 @@
     },
     {
       "tool": "highlight_to_feature",
-      "args": { "tab_name": "テーブル", "element_name": "テーブル" }
+      "args": { "tab_name": "テーブル", "element_name": "テーブル", "element_type": "AXRadioButton" }
+    },
+    {
+      "tool": "highlight_to_feature",
+      "args": { "tab_name": "テーブル", "element_name": "作成", "element_type": "AXButton" }
     }
   ]
 }

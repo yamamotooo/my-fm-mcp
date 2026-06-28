@@ -20,3 +20,4 @@ compatibility: macOS only. Requires FileMaker Pro and filemaker MCP server with 
 | スクリプトを書く、スクリプトワークスペース、スクリプト編集 | operations/navigate_script_workspace.json |
 | スクリプト管理、スクリプト一覧 | operations/navigate_script_manage.json |
 | テーブルを定義、テーブルを作る、テーブル追加、データベース管理 | operations/define_table.json |
+| キャッシュを削除、テンポラリファイルを削除 | operations/clear_cache.json |

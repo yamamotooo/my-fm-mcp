@@ -32,3 +32,6 @@ sample.xml
 
 # RFP / development specs (not for version control)
 mcp-server/rfp/
+
+# Skill zip archives
+*.zip

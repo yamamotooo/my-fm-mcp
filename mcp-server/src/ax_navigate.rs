@@ -31,6 +31,8 @@ extern "C" {
         keydown: bool,
     ) -> *mut std::ffi::c_void;
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+    fn CGColorCreateGenericRGB(r: f64, g: f64, b: f64, a: f64) -> *const std::ffi::c_void;
+    fn CGColorRelease(color: *const std::ffi::c_void);
 }
 
 /// キーコードを HID キューへ送信する
@@ -535,13 +537,39 @@ unsafe fn ax_get_element_frame(
     Ok((pt.x, pt.y, sz.width, sz.height))
 }
 
-/// NSWindow 赤ハイライト → 失敗時は osascript 通知 + スリープにフォールバック。
+/// サブプロセスモードのエントリポイント。--show-overlay で起動されたとき呼ばれる。
+#[cfg(target_os = "macos")]
+pub fn run_overlay_subprocess(x: f64, y: f64, w: f64, h: f64) {
+    if !try_nswindow_overlay(x, y, w, h) {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn run_overlay_subprocess(_x: f64, _y: f64, _w: f64, _h: f64) {}
+
+/// 自プロセスをサブプロセスとして起動してオーバーレイを表示し、即座に戻る。
+/// サブプロセスが3秒後に自動終了してウィンドウを閉じる。
+#[cfg(target_os = "macos")]
+fn spawn_overlay_subprocess(ax_x: f64, ax_y: f64, w: f64, h: f64) -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let coords = format!("{ax_x},{ax_y},{w},{h}");
+    std::process::Command::new(&exe)
+        .arg("--show-overlay")
+        .arg(&coords)
+        .spawn()
+        .is_ok()
+}
+
+/// NSWindow 赤ハイライト → サブプロセスで非同期表示（即座に戻る）。
+/// サブプロセス起動失敗時は osascript 通知にフォールバック。
 #[cfg(target_os = "macos")]
 unsafe fn ax_show_highlight_overlay(ax_x: f64, ax_y: f64, w: f64, h: f64, element_name: &str) {
-    if !try_nswindow_overlay(ax_x, ax_y, w, h) {
-        // CLI / NSApp 未起動環境: osascript 通知で代替
+    if !spawn_overlay_subprocess(ax_x, ax_y, w, h) {
         show_osascript_notification(element_name, ax_x, ax_y, w, h);
-        std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
 
@@ -592,10 +620,29 @@ fn try_nswindow_overlay(ax_x: f64, ax_y: f64, w: f64, h: f64) -> bool {
 
         window.setOpaque(false);
         window.setIgnoresMouseEvents(true);
-        // 半透明の赤ハイライト（CALayer 枠線の代わり、依存クレートを最小化）
-        window.setBackgroundColor(Some(
-            &NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.0, 0.0, 0.35),
-        ));
+        // ウィンドウ自体は透明にして contentView の CALayer で角丸ボーダーを描く
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+
+        // contentView を layer-backed にして角丸 5pt・赤ボーダー 3pt を設定
+        if let Some(view) = window.contentView() {
+            use objc::runtime::Object;
+            use objc::{msg_send, sel, sel_impl};
+            let view_ptr: *mut Object = &*view as *const _ as *mut Object;
+            let _: () = msg_send![view_ptr, setWantsLayer: true];
+            let layer: *mut Object = msg_send![view_ptr, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setCornerRadius: 5.0_f64];
+                let _: () = msg_send![layer, setBorderWidth: 3.0_f64];
+                let _: () = msg_send![layer, setMasksToBounds: true];
+                let border_color = CGColorCreateGenericRGB(1.0, 0.0, 0.0, 0.9);
+                let _: () = msg_send![layer, setBorderColor: border_color];
+                CGColorRelease(border_color);
+                // 内側は薄い赤で塗りつぶす
+                let bg_color = CGColorCreateGenericRGB(1.0, 0.0, 0.0, 0.12);
+                let _: () = msg_send![layer, setBackgroundColor: bg_color];
+                CGColorRelease(bg_color);
+            }
+        }
         // NSModalPanelWindowLevel(8) + 1 で FileMaker ダイアログの上に浮かせる
         // NSWindowLevel は isize の型エイリアス
         window.setLevel(objc2_app_kit::NSModalPanelWindowLevel + 1);
@@ -608,7 +655,12 @@ fn try_nswindow_overlay(ax_x: f64, ax_y: f64, w: f64, h: f64) -> bool {
         let end_date = NSDate::dateWithTimeIntervalSinceNow(3.0);
         NSRunLoop::currentRunLoop().runUntilDate(&end_date);
 
-        window.close();
+        // close() は isReleasedWhenClosed=true による二重解放の恐れがあるため使わない。
+        // orderOut で画面から除去し、50ms RunLoop を回してコンポジター更新を flush する。
+        // MCP デーモンはこの後 stdin 待ちに戻るため、flush しないと画面に残る。
+        window.orderOut(None);
+        let flush = NSDate::dateWithTimeIntervalSinceNow(0.05);
+        NSRunLoop::currentRunLoop().runUntilDate(&flush);
     }
 
     true

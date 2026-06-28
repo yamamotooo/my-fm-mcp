@@ -1,0 +1,8 @@
+{
+  "steps": [
+    {
+      "tool": "navigate_to_feature",
+      "args": { "keyword": "設定", "menu_item": "設定..." }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "steps": [
+    {
+      "tool": "navigate_to_feature",
+      "args": { "keyword": "スクリプト", "menu_item": "管理 > スクリプト..." }
+    }
+  ]
+}

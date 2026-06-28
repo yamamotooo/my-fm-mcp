@@ -1,0 +1,17 @@
+{
+  "steps": [
+    {
+      "tool": "navigate_to_feature",
+      "args": { "keyword": "データベース", "menu_item": "管理 > データベース..." },
+      "after": "Enterキーを押してダイアログを開いてください"
+    },
+    {
+      "tool": "await_for_user_interaction",
+      "args": { "dialog_title": "データベースの管理", "timeout_sec": 30 }
+    },
+    {
+      "tool": "highlight_to_feature",
+      "args": { "tab_name": "テーブル", "element_name": "テーブル" }
+    }
+  ]
+}

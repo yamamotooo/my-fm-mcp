@@ -7,8 +7,22 @@ mod ipc;
 mod layout_gen;
 
 fn main() {
-    // デバッグ CLI モード: cargo run -- <operations.json>
     let args: Vec<String> = std::env::args().collect();
+
+    // オーバーレイ表示サブプロセスモード: --show-overlay x,y,w,h
+    if args.get(1).map(|s| s.as_str()) == Some("--show-overlay") {
+        if let Some(coords) = args.get(2) {
+            let nums: Vec<f64> = coords.split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if nums.len() == 4 {
+                ax_navigate::run_overlay_subprocess(nums[0], nums[1], nums[2], nums[3]);
+            }
+        }
+        return;
+    }
+
+    // デバッグ CLI モード: cargo run -- <operations.json>
     if args.len() >= 2 {
         run_debug_operations(&args[1]);
         return;
@@ -202,6 +216,21 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                                     }
                                 },
                                 "required": []
+                            }
+                        },
+                        {
+                            "name": "run_operations",
+                            "description": "operations JSON の steps 配列を受け取り、navigate_to_feature / await_for_user_interaction / highlight_to_feature を Rust が直接順番に実行する。Claude の推論を挟まないため高速。Claude が operations ファイルを Read して steps 配列をそのまま渡す。",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "steps": {
+                                        "type": "array",
+                                        "description": "operations JSON の steps フィールドの配列をそのまま渡す",
+                                        "items": { "type": "object" }
+                                    }
+                                },
+                                "required": ["steps"]
                             }
                         },
                         {
@@ -468,6 +497,17 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
             }
         }
 
+        "run_operations" => {
+            let steps = match args["steps"].as_array() {
+                Some(s) => s.clone(),
+                None => return tool_result(id, json!([{ "type": "text", "text": "steps が配列ではありません" }])),
+            };
+            match execute_operations_steps(&steps) {
+                Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
+                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("実行エラー: {e}") }])),
+            }
+        }
+
         _ => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -489,45 +529,13 @@ fn tool_result(id: Value, content: Value) -> Value {
     })
 }
 
-/// rfp/operations/*.json を直接実行するデバッグ CLI モード。
-/// cargo run -- rfp/operations/define_table.json
-fn run_debug_operations(json_path: &str) {
-    let content = match std::fs::read_to_string(json_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("ファイル読み込み失敗: {json_path}: {e}");
-            std::process::exit(1);
-        }
-    };
 
-    let ops: Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("JSON パースエラー: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let steps = match ops["steps"].as_array() {
-        Some(s) => s.clone(),
-        None => {
-            eprintln!("steps フィールドがありません");
-            std::process::exit(1);
-        }
-    };
-
-    println!("[debug] {} ステップを実行: {json_path}", steps.len());
-
-    for (i, step) in steps.iter().enumerate() {
+/// operations JSON の steps を順番に実行し、各ステップの結果を改行結合して返す。
+fn execute_operations_steps(steps: &[Value]) -> Result<String, String> {
+    let mut results = Vec::new();
+    for step in steps {
         let tool = step["tool"].as_str().unwrap_or("(unknown)");
         let args = &step["args"];
-        let after = step["after"].as_str();
-
-        println!("\n[{}/{}] {tool}", i + 1, steps.len());
-        if args != &Value::Null {
-            println!("  args: {args}");
-        }
-
         let result = match tool {
             "navigate_to_feature" => {
                 let keyword = args["keyword"].as_str().unwrap_or("");
@@ -545,16 +553,41 @@ fn run_debug_operations(json_path: &str) {
                 ax_navigate::highlight_to_feature(tab_name, element_name)
             }
             unknown => Err(format!("未知のツール: {unknown}")),
-        };
+        }?;
+        results.push(result);
+    }
+    Ok(results.join("\n"))
+}
 
-        match result {
+/// operations/*.json を直接実行するデバッグ CLI モード。
+/// cargo run -- rfp/operations/define_table.json
+fn run_debug_operations(json_path: &str) {
+    let content = match std::fs::read_to_string(json_path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("ファイル読み込み失敗: {json_path}: {e}"); std::process::exit(1); }
+    };
+    let ops: Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => { eprintln!("JSON パースエラー: {e}"); std::process::exit(1); }
+    };
+    let steps = match ops["steps"].as_array() {
+        Some(s) => s.clone(),
+        None => { eprintln!("steps フィールドがありません"); std::process::exit(1); }
+    };
+
+    println!("[debug] {} ステップを実行: {json_path}", steps.len());
+
+    // デバッグ時は after メッセージも表示しながらステップごとに進捗を出す
+    for (i, step) in steps.iter().enumerate() {
+        let tool = step["tool"].as_str().unwrap_or("(unknown)");
+        let args = &step["args"];
+        let after = step["after"].as_str();
+        println!("\n[{}/{}] {tool}  args: {args}", i + 1, steps.len());
+        let single = std::slice::from_ref(step);
+        match execute_operations_steps(single) {
             Ok(msg) => println!("  OK: {msg}"),
-            Err(e) => {
-                eprintln!("  ERROR: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => { eprintln!("  ERROR: {e}"); std::process::exit(1); }
         }
-
         if let Some(msg) = after {
             println!("  → {msg}");
         }

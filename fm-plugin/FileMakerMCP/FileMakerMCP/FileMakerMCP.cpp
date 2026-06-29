@@ -529,36 +529,51 @@ static std::string GetRecordsJSON( const std::string& tableName, int limit )
 	fmx::ExprEnvUniquePtr env;
 	FMX_SetToCurrentEnv( env.get() );
 
-	fmx::DataUniquePtr fnResult;
-	fmx::TextUniquePtr fnExpr;
-	fnExpr->Assign( "GetValue ( DatabaseNames ; 1 )", fmx::Text::kEncoding_UTF8 );
-	if ( env->Evaluate( *fnExpr, *fnResult ) != 0 )
-		return "{\"status\":\"error\",\"message\":\"DatabaseNames failed\"}";
-	std::string fileName = FMXTextToUTF8( fnResult->GetAsText() );
-	fileName.erase( std::remove( fileName.begin(), fileName.end(), '\r' ), fileName.end() );
-	fileName.erase( std::remove( fileName.begin(), fileName.end(), '\n' ), fileName.end() );
+	// シングルクォートをエスケープ（SQL WHERE 句の文字列リテラル用）
+	std::string escapedOcc = tableName;
+	{
+		size_t pos = 0;
+		while ( (pos = escapedOcc.find( "'", pos )) != std::string::npos )
+		{
+			escapedOcc.replace( pos, 1, "''" );
+			pos += 2;
+		}
+	}
 
-	fmx::DataUniquePtr fieldsResult;
-	fmx::TextUniquePtr fieldsExpr;
-	std::string fieldsExprStr = "FieldNames ( \"" + fileName + "\" ; \"" + tableName + "\" )";
-	fieldsExpr->Assign( fieldsExprStr.c_str(), fmx::Text::kEncoding_UTF8 );
-	if ( env->Evaluate( *fieldsExpr, *fieldsResult ) != 0 )
-		return "{\"status\":\"error\",\"message\":\"FieldNames failed\"}";
-	std::vector<std::string> fields = SplitLines( FMXTextToUTF8( fieldsResult->GetAsText() ) );
-	if ( fields.empty() )
-		return "{\"status\":\"error\",\"message\":\"no fields found\"}";
+	// テーブルオカレンス名 → ベーステーブル名を解決（GetFieldsJSON と同じ方式）
+	// FileMaker SQL の FROM 句はベーステーブル名が必要
+	std::string baseNameCalc =
+		"ExecuteSQL ( "
+		"\"SELECT BaseTableName FROM FileMaker_Tables "
+		"WHERE TableName = '" + escapedOcc + "'\" "
+		"; \"\" ; \"\" )";
 
-	std::string sql = "SELECT * FROM \"" + tableName + "\" FETCH FIRST "
-	                + std::to_string( limit ) + " ROWS ONLY";
-	fmx::TextUniquePtr sqlText, fileText;
-	sqlText->Assign( sql.c_str(), fmx::Text::kEncoding_UTF8 );
-	fileText->Assign( fileName.c_str(), fmx::Text::kEncoding_UTF8 );
-	fmx::DataVectUniquePtr params;
+	fmx::DataUniquePtr baseResult;
+	fmx::TextUniquePtr baseExpr;
+	baseExpr->Assign( baseNameCalc.c_str(), fmx::Text::kEncoding_UTF8 );
+	std::string baseTableName = tableName;
+	if ( env->Evaluate( *baseExpr, *baseResult ) == 0 )
+	{
+		std::string bn = FMXTextToUTF8( baseResult->GetAsText() );
+		while ( !bn.empty() && ( bn.back() == '\r' || bn.back() == '\n' || bn.back() == ' ' ) )
+			bn.pop_back();
+		if ( !bn.empty() )
+			baseTableName = bn;
+	}
+
+	// GetFieldsJSON と同じく ExecuteSQL 関数を Evaluate 経由で呼び出す
+	// FM calc 文字列内では "" がリテラルの " になるため SQL 識別子の引用符に使う
+	std::string fmCalc =
+		"ExecuteSQL ( "
+		"\"SELECT * FROM \"\"" + baseTableName + "\"\" "
+		"FETCH FIRST " + std::to_string( limit ) + " ROWS ONLY\" "
+		"; \"\t\" ; \"\r\" )";
+
 	fmx::DataUniquePtr sqlResult;
-	fmx::errcode err = env->ExecuteFileSQLTextResult( *sqlText, *fileText, *params,
-	                                                   *sqlResult,
-	                                                   '\t',
-	                                                   '\r' );
+	fmx::TextUniquePtr sqlExpr;
+	sqlExpr->Assign( fmCalc.c_str(), fmx::Text::kEncoding_UTF8 );
+	fmx::errcode err = env->Evaluate( *sqlExpr, *sqlResult );
+
 	if ( err != 0 )
 		return "{\"status\":\"error\",\"message\":\"SQL failed\",\"code\":" + std::to_string( err ) + "}";
 

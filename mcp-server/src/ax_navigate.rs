@@ -404,19 +404,49 @@ fn await_for_user_interaction_macos(dialog_title: &str, element_name: &str, time
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 全ウィンドウ（ダイアログ・通常ウィンドウ）から要素を BFS 検索して AXPress する。
-pub fn click_element(element_name: &str, element_type: Option<&str>) -> Result<String, String> {
+pub fn click_element(element_name: &str, element_type: Option<&str>, panel: Option<&str>) -> Result<String, String> {
     #[cfg(target_os = "macos")]
-    return click_element_macos(element_name, element_type);
+    return click_element_macos(element_name, element_type, panel);
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (element_name, element_type);
+        let _ = (element_name, element_type, panel);
         Err("この機能は macOS のみサポートされています".to_string())
     }
 }
 
+/// ウインドウ直下の子要素から指定パネルのルート要素を返す。
+/// "object_panel"   → AXGroup (x≈0, 左フィールドリストパネル)
+/// "inspector_panel"→ AXScrollArea (x が最も右, 右インスペクタ)
 #[cfg(target_os = "macos")]
-fn click_element_macos(element_name: &str, element_type: Option<&str>) -> Result<String, String> {
+unsafe fn ax_find_panel_root(
+    window: accessibility_sys::AXUIElementRef,
+    panel: &str,
+) -> Option<accessibility_sys::AXUIElementRef> {
+    let children = ax_children_raw(window);
+    match panel {
+        "object_panel" => children.into_iter().find(|&child| {
+            ax_get_string(child, "AXRole").as_deref() == Some("AXGroup")
+                && ax_get_element_frame(child)
+                    .map(|(x, _, _, _)| x < 50.0)
+                    .unwrap_or(false)
+        }),
+        "inspector_panel" => children
+            .into_iter()
+            .filter(|&child| {
+                ax_get_string(child, "AXRole").as_deref() == Some("AXScrollArea")
+            })
+            .max_by(|&a, &b| {
+                let xa = ax_get_element_frame(a).map(|(x, _, _, _)| x).unwrap_or(0.0);
+                let xb = ax_get_element_frame(b).map(|(x, _, _, _)| x).unwrap_or(0.0);
+                xa.partial_cmp(&xb).unwrap_or(std::cmp::Ordering::Equal)
+            }),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn click_element_macos(element_name: &str, element_type: Option<&str>, panel: Option<&str>) -> Result<String, String> {
     use accessibility_sys::*;
     use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
     use core_foundation::string::CFString;
@@ -438,8 +468,17 @@ fn click_element_macos(element_name: &str, element_type: Option<&str>) -> Result
         let app = AXUIElementCreateApplication(pid);
         let ax_role = element_type.map(ax_role_from_japanese);
 
-        let element = ax_bfs_find_in_all_windows(app, element_name, ax_role)
-            .ok_or_else(|| format!("要素が見つかりません: {element_name}"))?;
+        let element = if let Some(panel_name) = panel {
+            let win = ax_find_main_window(app)
+                .ok_or_else(|| "メインウインドウが見つかりません".to_string())?;
+            let panel_root = ax_find_panel_root(win, panel_name)
+                .ok_or_else(|| format!("パネルが見つかりません: {panel_name}"))?;
+            ax_bfs_find_element(panel_root, element_name, ax_role)
+                .ok_or_else(|| format!("要素が見つかりません: {element_name} (panel: {panel_name})"))?
+        } else {
+            ax_bfs_find_in_all_windows(app, element_name, ax_role)
+                .ok_or_else(|| format!("要素が見つかりません: {element_name}"))?
+        };
 
         // レイアウトキャンバスオブジェクトは AXPress が効かないため座標クリックを使う。
         // フレームが取得できない場合のみ AXPress にフォールバックする。

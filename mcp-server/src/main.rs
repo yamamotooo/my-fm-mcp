@@ -275,7 +275,7 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                         },
                         {
                             "name": "click_element",
-                            "description": "FileMaker の全ウィンドウ（ダイアログ・通常ウィンドウ問わず）から要素を名前で検索し AXPress（クリック）する。レイアウト上のフィールド選択やインスペクタのタブ切り替えに使用する。macOS のアクセシビリティ API を使用。",
+                            "description": "FileMaker から要素を名前で検索しクリックする。panel を指定するとそのパネル内のみ検索する（誤検出防止）。macOS のアクセシビリティ API を使用。",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -286,6 +286,11 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                                     "element_type": {
                                         "type": "string",
                                         "description": "要素の種類（例: 'ボタン', 'テキストフィールド'）。省略時は種類を問わない。AXRole 文字列でも指定可。"
+                                    },
+                                    "panel": {
+                                        "type": "string",
+                                        "enum": ["object_panel", "inspector_panel"],
+                                        "description": "検索対象パネル。object_panel=左フィールド/オブジェクト/アドオンパネル、inspector_panel=右インスペクタパネル。省略時は全ウィンドウを検索。"
                                     }
                                 },
                                 "required": ["element_name"]
@@ -496,7 +501,8 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
                 return tool_result(id, json!([{ "type": "text", "text": "element_name が空です" }]));
             }
             let element_type = args["element_type"].as_str().filter(|s| !s.is_empty());
-            match ax_navigate::click_element(element_name, element_type) {
+            let panel = args["panel"].as_str().filter(|s| !s.is_empty());
+            match ax_navigate::click_element(element_name, element_type, panel) {
                 Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
                 Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("クリック失敗: {e}") }])),
             }
@@ -580,7 +586,8 @@ fn execute_operations_steps(steps: &[Value]) -> Result<String, String> {
             "click_element" => {
                 let element_name = args["element_name"].as_str().unwrap_or("");
                 let element_type = args["element_type"].as_str().filter(|s| !s.is_empty());
-                ax_navigate::click_element(element_name, element_type)
+                let panel = args["panel"].as_str().filter(|s| !s.is_empty());
+                ax_navigate::click_element(element_name, element_type, panel)
             }
             "navigate_to_feature" => {
                 let keyword = args["keyword"].as_str().unwrap_or("");

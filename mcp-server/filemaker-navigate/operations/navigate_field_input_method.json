@@ -17,7 +17,7 @@
     },
     {
       "tool": "click_element",
-      "args": { "element_name": "データ", "element_type": "AXButton" },
+      "args": { "element_name": "データ", "element_type": "AXButton", "panel": "inspector_panel" },
       "after": "インスペクタの「データ」タブに切り替わる"
     },
     {

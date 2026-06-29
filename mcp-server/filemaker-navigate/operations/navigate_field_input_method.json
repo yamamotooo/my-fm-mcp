@@ -1,0 +1,29 @@
+{
+  "steps": [
+    {
+      "tool": "navigate_to_feature",
+      "args": { "keyword": "レイアウトモード", "menu_item": "レイアウトモード" },
+      "after": "FileMaker がレイアウトモードへの切り替えを開始する"
+    },
+    {
+      "tool": "await_for_user_interaction",
+      "args": { "element_name": "レイアウトの終了", "timeout_sec": 10 },
+      "after": "「レイアウトの終了」ボタンが出現 → レイアウトモード切り替え完了を確認"
+    },
+    {
+      "tool": "click_element",
+      "args": { "element_name": "顧客No", "element_type": "AXTextField" },
+      "after": "レイアウト上の顧客Noフィールドが選択される"
+    },
+    {
+      "tool": "click_element",
+      "args": { "element_name": "データ", "element_type": "AXButton" },
+      "after": "インスペクタの「データ」タブに切り替わる"
+    },
+    {
+      "tool": "highlight_to_feature",
+      "args": { "element_name": "フィールド入力の動作" },
+      "after": "「フィールド入力の動作」が赤枠でハイライトされる"
+    }
+  ]
+}

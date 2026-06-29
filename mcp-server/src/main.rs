@@ -253,13 +253,17 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                         },
                         {
                             "name": "await_for_user_interaction",
-                            "description": "FileMaker のダイアログが開くのを待機する。ユーザーが操作してダイアログを開いたことを検出したら次のステップへ進む。macOS のアクセシビリティ API を使用。",
+                            "description": "FileMaker の特定要素の出現またはダイアログの出現を待機する。element_name を指定すると全ウィンドウからその要素が見つかるまで待機（モード切り替え検出に使用）。element_name が空の場合は従来通りダイアログ出現を待機する。macOS のアクセシビリティ API を使用。",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
+                                    "element_name": {
+                                        "type": "string",
+                                        "description": "出現を待つ要素名（例: 'レイアウトの終了'）。指定するとダイアログでなく要素の出現を待機する。"
+                                    },
                                     "dialog_title": {
                                         "type": "string",
-                                        "description": "待機対象ダイアログのタイトル（部分一致）。空の場合は任意のダイアログを検出する。"
+                                        "description": "待機対象ダイアログのタイトル（部分一致）。element_name が空の場合に使用。空なら任意のダイアログを検出する。"
                                     },
                                     "timeout_sec": {
                                         "type": "number",
@@ -270,8 +274,26 @@ fn handle(req: &Value, id: Value, method: &str) -> Value {
                             }
                         },
                         {
+                            "name": "click_element",
+                            "description": "FileMaker の全ウィンドウ（ダイアログ・通常ウィンドウ問わず）から要素を名前で検索し AXPress（クリック）する。レイアウト上のフィールド選択やインスペクタのタブ切り替えに使用する。macOS のアクセシビリティ API を使用。",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "element_name": {
+                                        "type": "string",
+                                        "description": "クリックする要素名（AXTitle / AXValue で部分一致）"
+                                    },
+                                    "element_type": {
+                                        "type": "string",
+                                        "description": "要素の種類（例: 'ボタン', 'テキストフィールド'）。省略時は種類を問わない。AXRole 文字列でも指定可。"
+                                    }
+                                },
+                                "required": ["element_name"]
+                            }
+                        },
+                        {
                             "name": "highlight_to_feature",
-                            "description": "現在開いているダイアログ内の要素を Accessibility API で探し、その周囲を赤枠で 3 秒間強調表示する。tab_name を指定するとタブを切り替えてから検索する。macOS のアクセシビリティ API を使用。",
+                            "description": "FileMaker のウィンドウ（ダイアログ優先、なければ通常ウィンドウ）内の要素を Accessibility API で探し、その周囲を赤枠で 3 秒間強調表示する。tab_name を指定するとタブを切り替えてから検索する。macOS のアクセシビリティ API を使用。",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -468,6 +490,18 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
             }
         }
 
+        "click_element" => {
+            let element_name = args["element_name"].as_str().unwrap_or("");
+            if element_name.is_empty() {
+                return tool_result(id, json!([{ "type": "text", "text": "element_name が空です" }]));
+            }
+            let element_type = args["element_type"].as_str().filter(|s| !s.is_empty());
+            match ax_navigate::click_element(element_name, element_type) {
+                Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
+                Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("クリック失敗: {e}") }])),
+            }
+        }
+
         "navigate_to_feature" => {
             let keyword = args["keyword"].as_str().unwrap_or("");
             if keyword.is_empty() {
@@ -482,8 +516,9 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
 
         "await_for_user_interaction" => {
             let dialog_title = args["dialog_title"].as_str().unwrap_or("");
+            let element_name = args["element_name"].as_str().unwrap_or("");
             let timeout_sec = args["timeout_sec"].as_u64().unwrap_or(30);
-            match ax_navigate::await_for_user_interaction(dialog_title, timeout_sec) {
+            match ax_navigate::await_for_user_interaction(dialog_title, element_name, timeout_sec) {
                 Ok(msg) => tool_result(id, json!([{ "type": "text", "text": msg }])),
                 Err(e) => tool_result(id, json!([{ "type": "text", "text": format!("待機タイムアウト: {e}") }])),
             }
@@ -542,6 +577,11 @@ fn execute_operations_steps(steps: &[Value]) -> Result<String, String> {
         let tool = step["tool"].as_str().unwrap_or("(unknown)");
         let args = &step["args"];
         let result = match tool {
+            "click_element" => {
+                let element_name = args["element_name"].as_str().unwrap_or("");
+                let element_type = args["element_type"].as_str().filter(|s| !s.is_empty());
+                ax_navigate::click_element(element_name, element_type)
+            }
             "navigate_to_feature" => {
                 let keyword = args["keyword"].as_str().unwrap_or("");
                 let menu_item = args["menu_item"].as_str().unwrap_or("");
@@ -549,8 +589,9 @@ fn execute_operations_steps(steps: &[Value]) -> Result<String, String> {
             }
             "await_for_user_interaction" => {
                 let dialog_title = args["dialog_title"].as_str().unwrap_or("");
+                let element_name = args["element_name"].as_str().unwrap_or("");
                 let timeout_sec = args["timeout_sec"].as_u64().unwrap_or(30);
-                ax_navigate::await_for_user_interaction(dialog_title, timeout_sec)
+                ax_navigate::await_for_user_interaction(dialog_title, element_name, timeout_sec)
             }
             "highlight_to_feature" => {
                 let tab_name = args["tab_name"].as_str().filter(|s| !s.is_empty());

@@ -1,0 +1,20 @@
+{
+  "steps": [
+    {
+      "tool": "navigate_to_feature",
+      "args": { "keyword": "xml", "menu_item": "名前を付けて XML として保存..." }
+    },
+    {
+      "tool": "await_for_user_interaction",
+      "args": { "dialog_title": "名前を付けて XML として保存", "timeout_sec": 30 }
+    },
+    {
+      "tool": "highlight_to_feature",
+      "args": { "tab_name": "", "element_name": "分析ツールの詳細を含める", "element_type": "AXCheckBox" }
+    },
+    {
+      "tool": "highlight_to_feature",
+      "args": { "tab_name": "", "element_name": "作成", "element_type": "AXButton" }
+    }
+  ]
+}

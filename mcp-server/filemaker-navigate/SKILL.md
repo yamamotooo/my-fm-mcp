@@ -21,3 +21,5 @@ compatibility: macOS only. Requires FileMaker Pro and filemaker MCP server with 
 | スクリプト管理、スクリプト一覧 | operations/navigate_script_manage.json |
 | テーブルを定義、テーブルを作る、テーブル追加、データベース管理 | operations/define_table.json |
 | キャッシュを削除、テンポラリファイルを削除 | operations/clear_cache.json |
+| XML を保存したい、XML ファイル作成 | operations/navigate_save_as_xml.json |
+| フィールド入力時の動作、フィールドを計算式で制御 | operations/navigate_field_input_method.json |

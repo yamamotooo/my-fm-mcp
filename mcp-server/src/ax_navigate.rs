@@ -16,6 +16,7 @@ extern "C" {}
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CGPoint { x: f64, y: f64 }
 
 #[cfg(target_os = "macos")]
@@ -30,9 +31,31 @@ extern "C" {
         keycode: u16,
         keydown: bool,
     ) -> *mut std::ffi::c_void;
+    fn CGEventCreateMouseEvent(
+        source: *const std::ffi::c_void,
+        mouse_type: u32,
+        mouse_cursor_position: CGPoint,
+        mouse_button: u32,
+    ) -> *mut std::ffi::c_void;
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
     fn CGColorCreateGenericRGB(r: f64, g: f64, b: f64, a: f64) -> *const std::ffi::c_void;
     fn CGColorRelease(color: *const std::ffi::c_void);
+}
+
+/// マウス左クリックを HID キューへ送信する（AX スクリーン座標）。
+/// AXPress が効かないレイアウトキャンバスオブジェクトの選択に使用する。
+#[cfg(target_os = "macos")]
+unsafe fn post_mouse_click(x: f64, y: f64) {
+    use core_foundation::base::CFTypeRef;
+    let pt = CGPoint { x, y };
+    // kCGEventLeftMouseDown = 1, kCGEventLeftMouseUp = 2, kCGMouseButtonLeft = 0
+    let down = CGEventCreateMouseEvent(std::ptr::null(), 1, pt, 0);
+    CGEventPost(0, down);
+    core_foundation::base::CFRelease(down as CFTypeRef);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let up = CGEventCreateMouseEvent(std::ptr::null(), 2, pt, 0);
+    CGEventPost(0, up);
+    core_foundation::base::CFRelease(up as CFTypeRef);
 }
 
 /// キーコードを HID キューへ送信する
@@ -313,21 +336,22 @@ fn cf_is_string(cf: core_foundation::base::CFTypeRef) -> bool {
 // await_for_user_interaction
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// FileMaker のダイアログ出現を待機する。
-/// dialog_title に部分一致するウィンドウが現れるまで polling する。
-pub fn await_for_user_interaction(dialog_title: &str, timeout_sec: u64) -> Result<String, String> {
+/// FileMaker のダイアログ出現または特定要素の出現を待機する。
+/// element_name が指定されたとき: 全ウィンドウからその要素が見つかるまで polling する。
+/// dialog_title のみ指定のとき: AXDialog ウィンドウが現れるまで polling する（従来動作）。
+pub fn await_for_user_interaction(dialog_title: &str, element_name: &str, timeout_sec: u64) -> Result<String, String> {
     #[cfg(target_os = "macos")]
-    return await_for_user_interaction_macos(dialog_title, timeout_sec);
+    return await_for_user_interaction_macos(dialog_title, element_name, timeout_sec);
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (dialog_title, timeout_sec);
+        let _ = (dialog_title, element_name, timeout_sec);
         Err("この機能は macOS のみサポートされています".to_string())
     }
 }
 
 #[cfg(target_os = "macos")]
-fn await_for_user_interaction_macos(dialog_title: &str, timeout_sec: u64) -> Result<String, String> {
+fn await_for_user_interaction_macos(dialog_title: &str, element_name: &str, timeout_sec: u64) -> Result<String, String> {
     use accessibility_sys::*;
     use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 
@@ -342,17 +366,26 @@ fn await_for_user_interaction_macos(dialog_title: &str, timeout_sec: u64) -> Res
         for _ in 0..iterations {
             std::thread::sleep(std::time::Duration::from_millis(100));
 
-            if let Some(wins_cf) = ax_copy_attr(app, "AXWindows") {
-                use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
-                let arr = wins_cf.as_CFTypeRef() as CFArrayRef;
-                let count = CFArrayGetCount(arr);
-                for i in 0..count {
-                    let win = CFArrayGetValueAtIndex(arr, i) as AXUIElementRef;
-                    if ax_get_string(win, "AXSubrole").as_deref() == Some("AXDialog") {
-                        let title = ax_get_string(win, "AXTitle").unwrap_or_default();
-                        if dialog_title.is_empty() || title.contains(dialog_title) {
-                            CFRelease(app as CFTypeRef);
-                            return Ok(format!("ダイアログを検出しました: {title}"));
+            if !element_name.is_empty() {
+                // 要素出現待機モード（モード切り替え検出などに使用）
+                if ax_bfs_find_in_all_windows(app, element_name, None).is_some() {
+                    CFRelease(app as CFTypeRef);
+                    return Ok(format!("要素を検出しました: {element_name}"));
+                }
+            } else {
+                // ダイアログ出現待機モード（従来動作）
+                if let Some(wins_cf) = ax_copy_attr(app, "AXWindows") {
+                    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
+                    let arr = wins_cf.as_CFTypeRef() as CFArrayRef;
+                    let count = CFArrayGetCount(arr);
+                    for i in 0..count {
+                        let win = CFArrayGetValueAtIndex(arr, i) as AXUIElementRef;
+                        if ax_get_string(win, "AXSubrole").as_deref() == Some("AXDialog") {
+                            let title = ax_get_string(win, "AXTitle").unwrap_or_default();
+                            if dialog_title.is_empty() || title.contains(dialog_title) {
+                                CFRelease(app as CFTypeRef);
+                                return Ok(format!("ダイアログを検出しました: {title}"));
+                            }
                         }
                     }
                 }
@@ -362,12 +395,116 @@ fn await_for_user_interaction_macos(dialog_title: &str, timeout_sec: u64) -> Res
         CFRelease(app as CFTypeRef);
     }
 
-    Err(format!("タイムアウト({timeout_sec}秒): ダイアログが検出されませんでした"))
+    let target = if !element_name.is_empty() { element_name } else { "ダイアログ" };
+    Err(format!("タイムアウト({timeout_sec}秒): {target} が検出されませんでした"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // highlight_to_feature
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// 全ウィンドウ（ダイアログ・通常ウィンドウ）から要素を BFS 検索して AXPress する。
+pub fn click_element(element_name: &str, element_type: Option<&str>) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    return click_element_macos(element_name, element_type);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (element_name, element_type);
+        Err("この機能は macOS のみサポートされています".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn click_element_macos(element_name: &str, element_type: Option<&str>) -> Result<String, String> {
+    use accessibility_sys::*;
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let pid = find_filemaker_pid()
+        .ok_or_else(|| "FileMaker Pro が起動していません".to_string())?;
+
+    unsafe {
+        // FileMaker をフォアグラウンドへ（クリックが確実に届くように）
+        let ns_app: *mut Object = msg_send![
+            class!(NSRunningApplication),
+            runningApplicationWithProcessIdentifier: pid
+        ];
+        let _: bool = msg_send![ns_app, activateWithOptions: 1u64];
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let app = AXUIElementCreateApplication(pid);
+        let ax_role = element_type.map(ax_role_from_japanese);
+
+        let element = ax_bfs_find_in_all_windows(app, element_name, ax_role)
+            .ok_or_else(|| format!("要素が見つかりません: {element_name}"))?;
+
+        // レイアウトキャンバスオブジェクトは AXPress が効かないため座標クリックを使う。
+        // フレームが取得できない場合のみ AXPress にフォールバックする。
+        if let Ok((x, y, w, h)) = ax_get_element_frame(element) {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            post_mouse_click(cx, cy);
+        } else {
+            let press = CFString::new("AXPress");
+            AXUIElementPerformAction(element, press.as_concrete_TypeRef());
+        }
+
+        CFRelease(app as CFTypeRef);
+        Ok(format!("「{element_name}」をクリックしました"))
+    }
+}
+
+/// AXWindows から非ダイアログウィンドウを CFRetain して返す。
+/// 非ダイアログが見つからない場合は最初のウィンドウを返す。
+#[cfg(target_os = "macos")]
+unsafe fn ax_find_main_window(
+    app: accessibility_sys::AXUIElementRef,
+) -> Option<accessibility_sys::AXUIElementRef> {
+    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
+    use core_foundation::base::{CFRetain, CFTypeRef, TCFType};
+
+    let wins_cf = ax_copy_attr(app, "AXWindows")?;
+    let arr = wins_cf.as_CFTypeRef() as CFArrayRef;
+    let count = CFArrayGetCount(arr);
+    for i in 0..count {
+        let win = CFArrayGetValueAtIndex(arr, i) as accessibility_sys::AXUIElementRef;
+        if ax_get_string(win, "AXSubrole").as_deref() != Some("AXDialog") {
+            CFRetain(win as CFTypeRef);
+            return Some(win);
+        }
+    }
+    if count > 0 {
+        let win = CFArrayGetValueAtIndex(arr, 0) as accessibility_sys::AXUIElementRef;
+        CFRetain(win as CFTypeRef);
+        return Some(win);
+    }
+    None
+}
+
+/// 全ウィンドウを対象に BFS 検索する（ダイアログ・通常ウィンドウ両方）。
+#[cfg(target_os = "macos")]
+unsafe fn ax_bfs_find_in_all_windows(
+    app: accessibility_sys::AXUIElementRef,
+    name: &str,
+    element_role: Option<&str>,
+) -> Option<accessibility_sys::AXUIElementRef> {
+    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
+    use core_foundation::base::TCFType;
+
+    let wins_cf = ax_copy_attr(app, "AXWindows")?;
+    let arr = wins_cf.as_CFTypeRef() as CFArrayRef;
+    let count = CFArrayGetCount(arr);
+    for i in 0..count {
+        let win = CFArrayGetValueAtIndex(arr, i) as accessibility_sys::AXUIElementRef;
+        if let Some(elem) = ax_bfs_find_element(win, name, element_role) {
+            return Some(elem);
+        }
+    }
+    None
+}
 
 /// Accessibility API で要素座標を取得し、周囲を透明ウィンドウで 3 秒間強調表示する。
 pub fn highlight_to_feature(tab_name: Option<&str>, element_name: &str, element_type: Option<&str>) -> Result<String, String> {
@@ -402,19 +539,23 @@ fn highlight_to_feature_macos(tab_name: Option<&str>, element_name: &str, elemen
     unsafe {
         let app = AXUIElementCreateApplication(pid);
 
-        // ダイアログウィンドウを探す
-        let dialog = ax_find_dialog(app, "")
-            .ok_or_else(|| "ダイアログが見つかりません".to_string())?;
+        // ダイアログ優先、なければ通常ウィンドウ
+        let search_root = if let Some(d) = ax_find_dialog(app, "") {
+            d
+        } else {
+            ax_find_main_window(app)
+                .ok_or_else(|| "FileMaker ウィンドウが見つかりません".to_string())?
+        };
 
         // タブ切り替え
         if let Some(tab) = tab_name {
-            ax_switch_tab(dialog, tab)?;
+            ax_switch_tab(search_root, tab)?;
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
 
         // BFS で要素を探す
         let ax_role = element_type.map(ax_role_from_japanese);
-        let element = ax_bfs_find_element(dialog, element_name, ax_role)
+        let element = ax_bfs_find_element(search_root, element_name, ax_role)
             .ok_or_else(|| format!("要素が見つかりません: {element_name}"))?;
 
         // 座標取得
@@ -423,9 +564,9 @@ fn highlight_to_feature_macos(tab_name: Option<&str>, element_name: &str, elemen
         // 赤枠オーバーレイを 3 秒表示
         ax_show_highlight_overlay(x, y, w, h, element_name);
 
-        // ax_find_dialog で CFRetain した分を解放
+        // CFRetain 済みの search_root を解放
         use core_foundation::base::CFRelease as CFReleaseRaw;
-        CFReleaseRaw(dialog as CFTypeRef);
+        CFReleaseRaw(search_root as CFTypeRef);
         CFRelease(app as CFTypeRef);
 
         Ok(format!("「{element_name}」を強調表示しました (x:{x:.0} y:{y:.0} w:{w:.0} h:{h:.0})"))
@@ -464,6 +605,7 @@ unsafe fn ax_find_dialog(
 }
 
 /// dialog 内の AXTabGroup からタブを BFS で探して AXPress する。
+/// AXTabGroup が見つからない場合は AXButton（FileMaker インスペクタのタブ形式）を試みる。
 #[cfg(target_os = "macos")]
 unsafe fn ax_switch_tab(
     dialog: accessibility_sys::AXUIElementRef,
@@ -487,6 +629,14 @@ unsafe fn ax_switch_tab(
         }
         queue.extend(ax_children_raw(elem));
     }
+
+    // フォールバック: FileMaker インスペクタのタブは AXButton（FMXRadioButtonCell）形式
+    if let Some(btn) = ax_bfs_find_element(dialog, tab_name, Some("AXButton")) {
+        let press = CFString::new("AXPress");
+        accessibility_sys::AXUIElementPerformAction(btn, press.as_concrete_TypeRef());
+        return Ok(());
+    }
+
     Err(format!("タブが見つかりません: {tab_name}"))
 }
 

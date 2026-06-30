@@ -341,10 +341,22 @@ static void IPC_ServerThread( int serverFd )
 	unlink( kSocketPath );
 }
 
+static void IPC_Log( const char* msg )
+{
+	FILE* f = fopen( "/tmp/filemaker_mcp_debug.log", "a" );
+	if ( f ) { fprintf( f, "%s\n", msg ); fclose( f ); }
+}
+
 static bool IPC_Start()
 {
+	IPC_Log( "IPC_Start: called" );
+
 	int fd = socket( AF_UNIX, SOCK_STREAM, 0 );
-	if ( fd < 0 ) return false;
+	if ( fd < 0 )
+	{
+		char buf[128]; snprintf( buf, sizeof(buf), "IPC_Start: socket() failed errno=%d", errno );
+		IPC_Log( buf ); return false;
+	}
 
 	unlink( kSocketPath );
 
@@ -355,15 +367,16 @@ static bool IPC_Start()
 
 	if ( bind( fd, reinterpret_cast<struct sockaddr*>( &addr ), sizeof( addr ) ) < 0 )
 	{
-		close( fd );
-		return false;
+		char buf[128]; snprintf( buf, sizeof(buf), "IPC_Start: bind() failed errno=%d", errno );
+		IPC_Log( buf ); close( fd ); return false;
 	}
 	if ( listen( fd, 5 ) < 0 )
 	{
-		close( fd );
-		return false;
+		char buf[128]; snprintf( buf, sizeof(buf), "IPC_Start: listen() failed errno=%d", errno );
+		IPC_Log( buf ); close( fd ); return false;
 	}
 
+	IPC_Log( "IPC_Start: success, socket created" );
 	gServerFd = fd;
 	gRunning  = true;
 	gServerThread = std::thread( IPC_ServerThread, fd );
@@ -388,6 +401,9 @@ static const char* kMCps( "MCps" );
 
 static fmx::ptrtype Do_PluginInit( fmx::int16 version )
 {
+	char buf[128]; snprintf( buf, sizeof(buf), "Do_PluginInit: version=%d k140=%d kCurrent=%d", (int)version, (int)k140ExtnVersion, (int)kCurrentExtnVersion );
+	IPC_Log( buf );
+
 	fmx::ptrtype result( static_cast<fmx::ptrtype>(kDoNotEnable) );
 
 	if (version >= k140ExtnVersion)
@@ -529,45 +545,56 @@ static std::string GetRecordsJSON( const std::string& tableName, int limit )
 	fmx::ExprEnvUniquePtr env;
 	FMX_SetToCurrentEnv( env.get() );
 
-	// シングルクォートをエスケープ（SQL WHERE 句の文字列リテラル用）
-	std::string escapedOcc = tableName;
+	auto sqlEscapeSingleQuote = []( const std::string& s ) {
+		std::string r; size_t pos = 0, prev = 0;
+		while ( (pos = s.find( "'", prev )) != std::string::npos )
+			{ r += s.substr( prev, pos - prev ) + "''"; prev = pos + 1; }
+		return r + s.substr( prev );
+	};
+
+	// FieldClass = 'Normal' かつ Container 以外のフィールド名を取得
+	// BaseTableName に tableName を直接渡す（テーブルオカレンス名 = ベース名の場合）
+	// FileMaker_Tables 経由の解決は不要（FileMaker_BaseTableFields が直接引ける）
+	std::string fieldListCalc =
+		"ExecuteSQL ( "
+		"\"SELECT FieldName FROM FileMaker_BaseTableFields "
+		"WHERE BaseTableName = '" + sqlEscapeSingleQuote( tableName ) + "' "
+		"AND FieldClass = 'Normal' "
+		"AND FieldType NOT LIKE 'binary%' "
+		"ORDER BY FieldId\" "
+		"; \"\" ; \"¶\" )";
+
+	fmx::DataUniquePtr fieldListResult;
+	fmx::TextUniquePtr fieldListExpr;
+	fieldListExpr->Assign( fieldListCalc.c_str(), fmx::Text::kEncoding_UTF8 );
+
+	std::vector<std::string> fieldNames;
+	if ( env->Evaluate( *fieldListExpr, *fieldListResult ) == 0 )
 	{
-		size_t pos = 0;
-		while ( (pos = escapedOcc.find( "'", pos )) != std::string::npos )
+		std::string raw = FMXTextToUTF8( fieldListResult->GetAsText() );
+		for ( auto& fn : SplitLines( raw ) )
 		{
-			escapedOcc.replace( pos, 1, "''" );
-			pos += 2;
+			while ( !fn.empty() && ( fn.back() == ' ' || fn.back() == '\t' ) ) fn.pop_back();
+			if ( !fn.empty() ) fieldNames.push_back( fn );
 		}
 	}
 
-	// テーブルオカレンス名 → ベーステーブル名を解決（GetFieldsJSON と同じ方式）
-	// FileMaker SQL の FROM 句はベーステーブル名が必要
-	std::string baseNameCalc =
-		"ExecuteSQL ( "
-		"\"SELECT BaseTableName FROM FileMaker_Tables "
-		"WHERE TableName = '" + escapedOcc + "'\" "
-		"; \"\" ; \"\" )";
+	if ( fieldNames.empty() )
+		return "{\"status\":\"error\",\"message\":\"no fields found for table: " + JsonEscape( tableName ) + "\"}";
 
-	fmx::DataUniquePtr baseResult;
-	fmx::TextUniquePtr baseExpr;
-	baseExpr->Assign( baseNameCalc.c_str(), fmx::Text::kEncoding_UTF8 );
-	std::string baseTableName = tableName;
-	if ( env->Evaluate( *baseExpr, *baseResult ) == 0 )
+	// SELECT 列リスト構築: FM calc 文字列内では ""fieldName"" が SQL の "fieldName" になる
+	std::string colList;
+	for ( const auto& fn : fieldNames )
 	{
-		std::string bn = FMXTextToUTF8( baseResult->GetAsText() );
-		while ( !bn.empty() && ( bn.back() == '\r' || bn.back() == '\n' || bn.back() == ' ' ) )
-			bn.pop_back();
-		if ( !bn.empty() )
-			baseTableName = bn;
+		if ( !colList.empty() ) colList += ", ";
+		colList += "\"\"" + fn + "\"\"";
 	}
 
-	// GetFieldsJSON と同じく ExecuteSQL 関数を Evaluate 経由で呼び出す
-	// FM calc 文字列内では "" がリテラルの " になるため SQL 識別子の引用符に使う
 	std::string fmCalc =
 		"ExecuteSQL ( "
-		"\"SELECT * FROM \"\"" + baseTableName + "\"\" "
+		"\"SELECT " + colList + " FROM \"\"" + tableName + "\"\" "
 		"FETCH FIRST " + std::to_string( limit ) + " ROWS ONLY\" "
-		"; \"\t\" ; \"\r\" )";
+		"; \"\t\" ; \"¶\" )";
 
 	fmx::DataUniquePtr sqlResult;
 	fmx::TextUniquePtr sqlExpr;
@@ -578,7 +605,15 @@ static std::string GetRecordsJSON( const std::string& tableName, int limit )
 		return "{\"status\":\"error\",\"message\":\"SQL failed\",\"code\":" + std::to_string( err ) + "}";
 
 	std::string rawData = FMXTextToUTF8( sqlResult->GetAsText() );
-	std::string json = "{\"status\":\"ok\",\"table\":\"" + JsonEscape( tableName ) + "\",\"records\":[";
+
+	// fields 配列（ヘッダ）を JSON に含める
+	std::string json = "{\"status\":\"ok\",\"table\":\"" + JsonEscape( tableName ) + "\",\"fields\":[";
+	for ( size_t i = 0; i < fieldNames.size(); ++i )
+	{
+		if ( i ) json += ',';
+		json += '"'; json += JsonEscape( fieldNames[i] ); json += '"';
+	}
+	json += "],\"records\":[";
 
 	bool firstRow = true;
 	for ( const auto& rowStr : SplitLines( rawData ) )
@@ -598,9 +633,7 @@ static std::string GetRecordsJSON( const std::string& tableName, int limit )
 		for ( size_t i = 0; i < cols.size(); ++i )
 		{
 			if ( i ) json += ',';
-			json += '"';
-			json += JsonEscape( cols[i] );
-			json += '"';
+			json += '"'; json += JsonEscape( cols[i] ); json += '"';
 		}
 		json += ']';
 	}

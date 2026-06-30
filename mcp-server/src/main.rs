@@ -364,12 +364,25 @@ fn dispatch_tool(id: Value, name: &str, args: &Value) -> Value {
                 Ok(resp) => {
                     if resp["status"] == "ok" {
                         let records = resp["records"].as_array().cloned().unwrap_or_default();
-                        let text = format!(
-                            "テーブル: {} ({} 件)\n{}",
-                            table,
-                            records.len(),
+                        let fields = resp["fields"].as_array().cloned().unwrap_or_default();
+                        let header: Vec<&str> = fields.iter()
+                            .filter_map(|f| f.as_str())
+                            .collect();
+                        let body = if header.is_empty() {
                             serde_json::to_string_pretty(&records).unwrap()
-                        );
+                        } else {
+                            let rows: Vec<String> = records.iter().map(|row| {
+                                let vals: Vec<String> = row.as_array()
+                                    .map(|cols| cols.iter().enumerate().map(|(i, v)| {
+                                        let k = header.get(i).copied().unwrap_or("?");
+                                        format!("{}: {}", k, v.as_str().unwrap_or(""))
+                                    }).collect())
+                                    .unwrap_or_default();
+                                format!("{{ {} }}", vals.join(", "))
+                            }).collect();
+                            rows.join("\n")
+                        };
+                        let text = format!("テーブル: {} ({} 件)\n{}", table, records.len(), body);
                         tool_result(id, json!([{ "type": "text", "text": text }]))
                     } else {
                         let msg = resp["message"].as_str().unwrap_or("unknown error");
